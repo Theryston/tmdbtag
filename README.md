@@ -2,7 +2,7 @@
 
 Modern, polished, and highly interactive CLI for organizing .mkv video files using the identifier and title registered in [The Movie Database (TMDB)](https://www.themoviedb.org/).
 
-> Status: product specification / MVP. The repository currently contains only the initial Rust skeleton; the application described in this document has not been implemented yet.
+> Status: MVP in progress. Task 01 (CLI foundation and interactive terminal shell) is implemented. TMDB integration, filesystem discovery, naming, planning, and file movement remain for the following tasks.
 
 This README is the source of truth for the expected behavior. Any implementation, flow change, or new feature must be compared against this document before it is incorporated.
 
@@ -787,6 +787,7 @@ Principles:
 ~~~text
 title-tmdb-file/
 ├── Cargo.toml
+├── Cargo.lock
 ├── README.md
 ├── AGENTS.md
 ├── tasks/
@@ -797,7 +798,13 @@ title-tmdb-file/
 │   ├── 04-naming-normalization-and-metadata-recovery.md
 │   └── 05-plan-preview-and-safe-file-movement.md
 └── src/
-    └── main.rs
+    ├── main.rs
+    ├── app.rs
+    ├── cli.rs
+    ├── config.rs
+    ├── domain.rs
+    ├── error.rs
+    └── ui.rs
 ~~~
 
 ### Suggested target structure
@@ -818,10 +825,11 @@ title-tmdb-file/
 ├── src/
 │   ├── main.rs              # binary entry point and exit code
 │   ├── app.rs               # orchestration of the complete flow
-│   ├── cli.rs               # clap parser and interactive wizard
+│   ├── cli.rs               # clap parser and terminal renderer
 │   ├── config.rs            # current directory, destination, and credentials
 │   ├── domain.rs            # media, selection, and plan types
 │   ├── error.rs             # application errors
+│   ├── ui.rs                # renderer-neutral terminal interaction contracts
 │   ├── filesystem.rs        # discovery, validation, and safe movement
 │   ├── naming.rs            # title normalization, filename generation, and parsing
 │   └── tmdb/
@@ -834,6 +842,8 @@ title-tmdb-file/
     ├── filesystem.rs
     └── fixtures/
 ~~~
+
+Task 01 currently implements `clap` for command parsing, `dialoguer` for password/text/select/multi-select controls, and `indicatif` for activity feedback. These libraries are implementation details behind the CLI/UI boundary and may be replaced only after the interaction contract and user experience are preserved.
 
 This is a suggested organization, not a requirement to create every file immediately. The important rule is to keep the UI, TMDB, filesystem, and filename-composition concerns decoupled.
 

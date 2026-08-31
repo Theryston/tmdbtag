@@ -1,6 +1,6 @@
 # Task 01 — CLI Foundation and Interactive Terminal Shell
 
-**Status:** Not started
+**Status:** Completed
 **Priority:** P0
 **Dependencies:** None
 **Blocks:** Tasks 02, 03, 04, and 05
@@ -24,6 +24,18 @@ title-tmdb-file --version
 The `--help` and `--version` paths must be handled by `clap` and must finish without asking for a TMDB API key, making a network request, or scanning the current directory. Invalid command-line input must produce a useful `clap` diagnostic and a non-zero usage exit code.
 
 The normal workflow must expose a polished terminal experience with clear visual hierarchy, keyboard-friendly controls, searchable selection lists where lists are long, progress feedback during work, and an explicit confirmation before mutation. The interface must remain usable in a small terminal and must not depend on mouse input.
+
+## Implementation decision
+
+The foundation uses:
+
+- `clap` for the command-line parser, help, version, and usage diagnostics;
+- `dialoguer` for masked secrets, text input, keyboard selection, and multiple selection;
+- an adapter-level case-insensitive filter for searchable long lists before displaying selection controls;
+- `indicatif` for spinner/progress contracts;
+- `thiserror` for typed configuration, UI, and application errors.
+
+The renderer-neutral interaction contracts live in `src/ui.rs`. The concrete terminal adapter lives in `src/cli.rs`, and the application workflow consumes the contracts without depending on dialoguer or indicatif directly.
 
 ## Scope
 
@@ -167,14 +179,14 @@ Use a fake or scripted UI in application tests. Do not require a human, a real t
 
 ## Acceptance checklist
 
-- [ ] `clap` owns command-line parsing, help, version, and usage diagnostics.
-- [ ] `title-tmdb-file --help` exits without credentials, network access, or filesystem discovery.
-- [ ] `title-tmdb-file --version` exits without credentials, network access, or filesystem discovery.
-- [ ] The default invocation enters the interactive workflow.
-- [ ] The UI boundary supports masked input, searchable selection, multiple selection, confirmation, cancellation, and progress contracts.
-- [ ] The API-key question precedes the language question, and both precede filesystem discovery.
-- [ ] All application-owned text is English.
-- [ ] The UI remains understandable without color and in a narrow terminal.
-- [ ] `main.rs` contains no business rules or file operations.
-- [ ] Automated tests cover parser paths, cancellation, and the UI/application boundary.
-- [ ] Formatting, build, tests, and applicable lint checks pass.
+- [x] `clap` owns command-line parsing, help, version, and usage diagnostics.
+- [x] `title-tmdb-file --help` exits without credentials, network access, or filesystem discovery.
+- [x] `title-tmdb-file --version` exits without credentials, network access, or filesystem discovery.
+- [x] The default invocation enters the interactive workflow.
+- [x] The UI boundary supports masked input, searchable selection, multiple selection, confirmation, cancellation, and progress contracts.
+- [x] The API-key question precedes the language question, and both precede filesystem discovery.
+- [x] All application-owned text is English.
+- [x] The UI remains understandable without color and in a narrow terminal.
+- [x] `main.rs` contains no business rules or file operations.
+- [x] Automated tests cover parser paths, cancellation, and the UI/application boundary.
+- [x] Formatting, build, tests, and applicable lint checks pass.

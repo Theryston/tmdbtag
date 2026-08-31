@@ -35,11 +35,12 @@ Do not silently reinterpret a requirement because a different design seems more 
 
 ## Repository status
 
-At the time this document was written, the repository is intentionally minimal:
+The repository currently contains the initial implementation boundaries and task breakdown:
 
 ~~~text
 title-tmdb-file/
 ├── Cargo.toml
+├── Cargo.lock
 ├── README.md
 ├── AGENTS.md
 ├── tasks/
@@ -50,10 +51,18 @@ title-tmdb-file/
 │   ├── 04-naming-normalization-and-metadata-recovery.md
 │   └── 05-plan-preview-and-safe-file-movement.md
 └── src/
-    └── main.rs
+    ├── main.rs
+    ├── app.rs
+    ├── cli.rs
+    ├── config.rs
+    ├── domain.rs
+    ├── error.rs
+    └── ui.rs
 ~~~
 
-The current Rust program is only a placeholder. Do not describe an unimplemented feature as already available.
+The remaining media-organization workflow is still a placeholder. Do not describe TMDB verification, filesystem discovery, naming, planning, or movement as already available.
+
+The CLI foundation is now implemented: command parsing, interactive terminal contracts, startup input collection, and local configuration validation are available. TMDB verification, filesystem discovery, naming, planning, and movement are still unimplemented until their respective tasks are completed.
 
 The repository is a binary application, not a library product at this stage. Nevertheless, the core logic must be structured so it can be tested without driving a real terminal or contacting the real TMDB service.
 
@@ -429,6 +438,8 @@ Before adding a dependency:
 
 clap is a required dependency, but its exact version must still be selected according to the project's supported Rust toolchain. The interactive prompt/rendering library is a separate dependency and must be evaluated for keyboard navigation, multiple selection, search, styling, terminal fallback, maintenance, and platform support. Do not invent a package name or put an unverified crate into Cargo.toml.
 
+Task 01 selected `clap` for command parsing, `dialoguer` for interactive prompts and keyboard selection, `indicatif` for spinner/progress feedback, and `thiserror` for typed errors. These dependencies must remain behind the appropriate boundaries. The current dialoguer adapter provides searchable selection by filtering long lists before handing the visible options to its selection controls; callers must not depend on dialoguer types directly.
+
 For a binary application, Cargo.lock should be generated and versioned once dependencies are introduced, unless the repository's explicit policy changes.
 
 ## Required architecture
@@ -443,6 +454,7 @@ src/
 ├── config.rs
 ├── domain.rs
 ├── error.rs
+├── ui.rs
 ├── filesystem.rs
 ├── naming.rs
 └── tmdb/
@@ -518,6 +530,10 @@ The CLI layer must not:
 - log credentials.
 
 Keep prompt text in one place where possible. This makes future localization, snapshot tests, and wording changes safer.
+
+### ui.rs
+
+ui.rs owns renderer-neutral interaction contracts such as `InteractiveUi`, message severity, and progress output. It must not import `clap`, dialoguer, indicatif, filesystem APIs, HTTP clients, or environment access. The concrete terminal implementation belongs in cli.rs and must satisfy these contracts without leaking terminal-library types into the application or domain.
 
 ### config.rs
 
