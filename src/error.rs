@@ -227,6 +227,27 @@ pub enum NamingError {
     FilenameTooLong,
 }
 
+/// Errors raised while combining selections, verified metadata, and generated names into a plan.
+#[derive(Debug, Error)]
+pub enum PlanningError {
+    /// No source file was available to organize.
+    #[error("The operation plan must contain at least one video file.")]
+    EmptyPlan,
+    /// A selected source folder unexpectedly contains no files.
+    #[error("The source folder {folder} has no selected video files.")]
+    NoSelectedFiles { folder: PathBuf },
+    /// The same series episode was assigned to more than one selected file.
+    #[error(
+        "Series {series_id} episode S{season:02}E{episode:02} was assigned more than once (file: {file})."
+    )]
+    DuplicateSeriesEpisode {
+        series_id: u64,
+        season: u32,
+        episode: u32,
+        file: PathBuf,
+    },
+}
+
 /// Errors raised while resolving the working directory, destination, or selectable media.
 #[derive(Debug, Error)]
 pub enum FilesystemError {
@@ -260,6 +281,15 @@ pub enum FilesystemError {
         /// The operating-system error.
         #[source]
         source: io::Error,
+    },
+    /// A selected source file or folder could not be inspected.
+    #[error("Cannot inspect source path {path}: {cause}")]
+    SourceMetadata {
+        /// The source path that was inspected.
+        path: PathBuf,
+        /// The operating-system error.
+        #[source]
+        cause: io::Error,
     },
     /// The user submitted an empty destination path.
     #[error("The destination path cannot be empty.")]
@@ -317,6 +347,188 @@ pub enum FilesystemError {
         /// The rejected destination path.
         path: PathBuf,
     },
+    /// The operation plan contains no files.
+    #[error("The operation plan must contain at least one video file.")]
+    EmptyOperationPlan,
+    /// A selected source folder no longer exists.
+    #[error("The selected source folder no longer exists: {path}")]
+    SourceFolderNotFound {
+        /// The missing source folder.
+        path: PathBuf,
+    },
+    /// A selected source folder is no longer a real directory.
+    #[error("The selected source folder is not a real directory: {path}")]
+    SourceFolderInvalid {
+        /// The invalid source folder.
+        path: PathBuf,
+    },
+    /// A source path selected during planning no longer exists.
+    #[error("The selected source file no longer exists: {path}")]
+    SourceNotFound {
+        /// The missing source path.
+        path: PathBuf,
+    },
+    /// A source path is no longer a regular file.
+    #[error("The selected source path is not a regular video file: {path}")]
+    SourceNotRegularFile {
+        /// The changed source path.
+        path: PathBuf,
+    },
+    /// A source path became a symbolic link after selection.
+    #[error("The selected source file became a symbolic link and was not moved: {path}")]
+    SourceSymlink {
+        /// The unsafe source path.
+        path: PathBuf,
+    },
+    /// A source path no longer has a recognized video extension.
+    #[error("The selected source file no longer has a recognized video extension: {path}")]
+    SourceUnsupportedExtension {
+        /// The source path with the unsupported extension.
+        path: PathBuf,
+    },
+    /// The source file's extension changed after it was selected.
+    #[error(
+        "The selected source file extension changed for {path}: expected .{expected}, found .{actual}."
+    )]
+    SourceExtensionChanged {
+        /// The changed source path.
+        path: PathBuf,
+        /// The extension captured in the plan.
+        expected: String,
+        /// The extension observed during revalidation.
+        actual: String,
+    },
+    /// The source file changed after the plan was built.
+    #[error("The selected source file changed after planning: {path}")]
+    SourceChanged {
+        /// The changed source path.
+        path: PathBuf,
+    },
+    /// A selected file is not inside the source folder recorded for its operation.
+    #[error("The source file {source_path} is outside its selected source folder {folder}.")]
+    SourceFolderMismatch {
+        /// The source path.
+        source_path: PathBuf,
+        /// The recorded source folder.
+        folder: PathBuf,
+    },
+    /// One source file was included more than once in a plan.
+    #[error("The source file appears more than once in the operation plan: {path}")]
+    DuplicateSource {
+        /// The duplicated source path.
+        path: PathBuf,
+    },
+    /// A generated destination path already exists.
+    #[error("The destination file already exists: {path}")]
+    DestinationAlreadyExists {
+        /// The conflicting destination path.
+        path: PathBuf,
+    },
+    /// Two operations generated the same destination path.
+    #[error("Multiple operations generate the same destination file: {path}")]
+    DuplicateDestination {
+        /// The duplicated destination path.
+        path: PathBuf,
+    },
+    /// A destination changed state between selection and validation.
+    #[error("The destination changed after it was selected: {path}")]
+    DestinationStateChanged {
+        /// The changed destination path.
+        path: PathBuf,
+    },
+    /// The existing destination directory cannot be written safely.
+    #[error("The destination directory is not writable: {path}")]
+    DestinationNotWritable {
+        /// The destination directory.
+        path: PathBuf,
+    },
+    /// The plan does not have permission to create the selected destination.
+    #[error("The destination does not exist and was not approved for creation: {path}")]
+    DestinationCreationNotAllowed {
+        /// The deferred destination path.
+        path: PathBuf,
+    },
+    /// A destination could not be created at the commit point.
+    #[error("Cannot create the destination directory at {path}: {cause}")]
+    DestinationCreation {
+        /// The destination directory.
+        path: PathBuf,
+        /// The operating-system error.
+        #[source]
+        cause: io::Error,
+    },
+    /// A generated destination escaped the selected destination directory.
+    #[error("The generated destination is outside the selected destination directory: {path}")]
+    DestinationEscapes {
+        /// The unsafe destination path.
+        path: PathBuf,
+    },
+    /// A source and destination path refer to the same file.
+    #[error("The source and destination refer to the same file: {path}")]
+    SourceDestinationSame {
+        /// The conflicting path.
+        path: PathBuf,
+    },
+    /// A no-replace same-volume publication failed.
+    #[error("Cannot safely move {source_path} to {destination}: {cause}")]
+    SameVolumeMove {
+        /// The source path.
+        source_path: PathBuf,
+        /// The destination path.
+        destination: PathBuf,
+        /// The operating-system error.
+        #[source]
+        cause: io::Error,
+    },
+    /// A cross-volume copy or its temporary-file lifecycle failed.
+    #[error("Cannot safely copy {source_path} to {destination}: {reason}")]
+    CrossVolumeCopy {
+        /// The source path.
+        source_path: PathBuf,
+        /// The destination path.
+        destination: PathBuf,
+        /// A safe operation description.
+        reason: String,
+    },
+    /// The copied bytes did not match the source snapshot.
+    #[error("The copy from {source_path} to {destination} could not be verified: {reason}")]
+    CopyVerification {
+        /// The source path.
+        source_path: PathBuf,
+        /// The destination path.
+        destination: PathBuf,
+        /// A safe verification explanation.
+        reason: String,
+    },
+    /// The temporary copy could not be published without replacement.
+    #[error("Cannot publish the copied file at {path}: {cause}")]
+    DestinationPublication {
+        /// The final destination path.
+        path: PathBuf,
+        /// The operating-system error.
+        #[source]
+        cause: io::Error,
+    },
+    /// The verified destination exists but the source could not be removed.
+    #[error(
+        "The destination was published, but the source could not be removed at {path}: {cause}"
+    )]
+    SourceRemoval {
+        /// The source path that remains.
+        path: PathBuf,
+        /// The operating-system error.
+        #[source]
+        cause: io::Error,
+    },
+    /// A temporary artifact could not be removed after a failed operation.
+    #[error("A temporary file could not be cleaned up at {path}: {cause}")]
+    TemporaryCleanup {
+        /// The temporary artifact path.
+        path: PathBuf,
+        /// The operating-system error.
+        #[source]
+        cause: io::Error,
+    },
 }
 
 impl FilesystemError {
@@ -330,12 +542,38 @@ impl FilesystemError {
             | Self::DestinationUnsupportedType { .. }
             | Self::DestinationParentNotDirectory { .. }
             | Self::DestinationIsSourceRoot { .. }
-            | Self::DestinationIsSelectedSource { .. } => 2,
+            | Self::DestinationIsSelectedSource { .. }
+            | Self::EmptyOperationPlan
+            | Self::SourceFolderNotFound { .. }
+            | Self::SourceFolderInvalid { .. }
+            | Self::SourceNotFound { .. }
+            | Self::SourceNotRegularFile { .. }
+            | Self::SourceSymlink { .. }
+            | Self::SourceUnsupportedExtension { .. }
+            | Self::SourceExtensionChanged { .. }
+            | Self::SourceChanged { .. }
+            | Self::SourceFolderMismatch { .. }
+            | Self::DuplicateSource { .. }
+            | Self::DestinationAlreadyExists { .. }
+            | Self::DuplicateDestination { .. }
+            | Self::DestinationStateChanged { .. }
+            | Self::DestinationNotWritable { .. }
+            | Self::DestinationCreationNotAllowed { .. }
+            | Self::DestinationEscapes { .. }
+            | Self::SourceDestinationSame { .. } => 2,
             Self::CurrentDirectory { .. }
             | Self::SourceRootMetadata { .. }
             | Self::SourceRootNotDirectory { .. }
             | Self::ReadDirectory { .. }
-            | Self::DestinationMetadata { .. } => 1,
+            | Self::DestinationMetadata { .. }
+            | Self::SourceMetadata { .. }
+            | Self::DestinationCreation { .. }
+            | Self::SameVolumeMove { .. }
+            | Self::CrossVolumeCopy { .. }
+            | Self::CopyVerification { .. }
+            | Self::DestinationPublication { .. }
+            | Self::SourceRemoval { .. }
+            | Self::TemporaryCleanup { .. } => 1,
         }
     }
 }
@@ -390,6 +628,9 @@ pub enum AppError {
     /// Filename generation or parsing failed.
     #[error(transparent)]
     Naming(#[from] NamingError),
+    /// The selections and verified metadata cannot form one safe operation plan.
+    #[error(transparent)]
+    Planning(#[from] PlanningError),
     /// Filesystem discovery or destination validation failed.
     #[error(transparent)]
     Filesystem(#[from] FilesystemError),
@@ -409,6 +650,7 @@ impl AppError {
             Self::Domain(_) => 2,
             Self::Tmdb(error) => error.exit_code(),
             Self::Naming(_) => 2,
+            Self::Planning(_) => 2,
             Self::Filesystem(error) => error.exit_code(),
             Self::NonInteractive => 2,
             Self::Ui(_) => 1,

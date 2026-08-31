@@ -1,22 +1,30 @@
-//! Filesystem discovery and path validation for the interactive workflow.
+//! Filesystem discovery, plan validation, and safe execution for the interactive workflow.
 //!
-//! This module deliberately stops at selection. It does not create, rename, copy, delete, or
-//! move anything. Later planning and execution stages receive the exact paths returned here and
-//! are responsible for revalidating them immediately before a confirmed mutation.
+//! Discovery and plan construction remain non-mutating. Once the application has displayed and
+//! confirmed an immutable plan, this module owns the destination commit, no-replace publication,
+//! cross-volume copy verification, source removal, and per-file execution report.
 
 use std::{
     cmp::Ordering,
-    env, fs, io,
+    env,
+    fs::{self, File, OpenOptions},
+    io::{self, Write},
     path::{Component, Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering as AtomicOrdering},
 };
 
 use crate::{
-    domain::{DestinationSelection, SourceFolder, SourceRoot, VideoExtension, VideoFile},
+    domain::{
+        DestinationSelection, ExecutionReport, FileSnapshot, OperationPlan, OperationResult,
+        OperationStatus, PlannedOperation, SourceFolder, SourceRoot, VideoExtension, VideoFile,
+    },
     error::FilesystemError,
 };
 
 /// Backward-compatible access to the shared video-extension policy.
 pub use crate::domain::VIDEO_EXTENSIONS;
+
+static NEXT_TEMP_FILE_ID: AtomicU64 = AtomicU64::new(1);
 
 /// The result of a deterministic directory scan and the non-fatal entries skipped during it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -352,6 +360,622 @@ pub fn has_video_extension(path: &Path) -> bool {
         .is_some_and(|extension| VideoExtension::parse(extension).is_ok())
 }
 
+/// Reads and validates the recognized video extension of a selected regular file.
+pub fn source_video_extension(path: &Path) -> Result<VideoExtension, FilesystemError> {
+    let metadata = read_source_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Err(FilesystemError::SourceSymlink {
+            path: path.to_owned(),
+        });
+    }
+    if !metadata.is_file() {
+        return Err(FilesystemError::SourceNotRegularFile {
+            path: path.to_owned(),
+        });
+    }
+
+    let Some(extension) = path.extension().and_then(|extension| extension.to_str()) else {
+        return Err(FilesystemError::SourceUnsupportedExtension {
+            path: path.to_owned(),
+        });
+    };
+    VideoExtension::parse(extension).map_err(|_| FilesystemError::SourceUnsupportedExtension {
+        path: path.to_owned(),
+    })
+}
+
+/// Captures the portable source-file identity used by plan revalidation.
+pub fn snapshot_source_file(path: &Path) -> Result<FileSnapshot, FilesystemError> {
+    let metadata = read_source_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Err(FilesystemError::SourceSymlink {
+            path: path.to_owned(),
+        });
+    }
+    if !metadata.is_file() {
+        return Err(FilesystemError::SourceNotRegularFile {
+            path: path.to_owned(),
+        });
+    }
+
+    Ok(FileSnapshot::new(metadata.len(), metadata.modified().ok()))
+}
+
+fn read_source_metadata(path: &Path) -> Result<fs::Metadata, FilesystemError> {
+    fs::symlink_metadata(path).map_err(|cause| {
+        if cause.kind() == io::ErrorKind::NotFound {
+            FilesystemError::SourceNotFound {
+                path: path.to_owned(),
+            }
+        } else {
+            FilesystemError::SourceMetadata {
+                path: path.to_owned(),
+                cause,
+            }
+        }
+    })
+}
+
+/// Validates every operation without changing the filesystem.
+pub fn validate_move_plan(plan: &OperationPlan) -> Result<(), FilesystemError> {
+    if plan.operations().is_empty() {
+        return Err(FilesystemError::EmptyOperationPlan);
+    }
+
+    validate_plan_destination(plan)?;
+
+    let mut source_paths = Vec::new();
+    let mut destination_paths = Vec::new();
+    for operation in plan.operations() {
+        validate_source_folder(operation.source_folder())?;
+        if !path_is_same_or_descendant(operation.source_path(), operation.source_folder())
+            || paths_equivalent(operation.source_path(), operation.source_folder())
+        {
+            return Err(FilesystemError::SourceFolderMismatch {
+                source_path: operation.source_path().to_owned(),
+                folder: operation.source_folder().to_owned(),
+            });
+        }
+
+        if source_paths
+            .iter()
+            .any(|path: &PathBuf| paths_equivalent(path, operation.source_path()))
+        {
+            return Err(FilesystemError::DuplicateSource {
+                path: operation.source_path().to_owned(),
+            });
+        }
+        source_paths.push(operation.source_path().to_owned());
+
+        validate_source_operation(operation)?;
+        validate_destination_path(plan, operation)?;
+
+        if destination_paths
+            .iter()
+            .any(|path: &PathBuf| paths_equivalent(path, operation.destination_path()))
+        {
+            return Err(FilesystemError::DuplicateDestination {
+                path: operation.destination_path().to_owned(),
+            });
+        }
+        destination_paths.push(operation.destination_path().to_owned());
+    }
+
+    Ok(())
+}
+
+/// Executes a previously validated plan and returns one result for every planned file.
+pub fn execute_move_plan(plan: &OperationPlan) -> Result<ExecutionReport, FilesystemError> {
+    execute_move_plan_with_progress(plan, |_, _| {})
+}
+
+/// Executes a plan while notifying the caller immediately before each operation starts.
+///
+/// The callback is presentation-only: it cannot change the plan or authorize a move. The
+/// filesystem layer still performs all validation and owns every mutation.
+pub fn execute_move_plan_with_progress<F>(
+    plan: &OperationPlan,
+    mut before_operation: F,
+) -> Result<ExecutionReport, FilesystemError>
+where
+    F: FnMut(usize, &PlannedOperation),
+{
+    validate_move_plan(plan)?;
+    let operations = plan.operations();
+    Ok(execute_validated_move_plan(
+        plan,
+        MoveMode::Automatic,
+        |index| before_operation(index, &operations[index]),
+    ))
+}
+
+fn validate_plan_destination(plan: &OperationPlan) -> Result<(), FilesystemError> {
+    let destination = plan.destination();
+    let destination_path = destination.path();
+    let current_state = fs::symlink_metadata(destination_path);
+
+    match (destination.exists(), current_state) {
+        (true, Ok(metadata)) => {
+            if metadata.file_type().is_symlink() {
+                return Err(FilesystemError::DestinationSymlink {
+                    path: destination_path.to_owned(),
+                });
+            }
+            if !metadata.is_dir() {
+                return Err(FilesystemError::DestinationUnsupportedType {
+                    path: destination_path.to_owned(),
+                });
+            }
+            ensure_destination_writable(destination_path, &metadata)?;
+        }
+        (true, Err(cause)) if cause.kind() == io::ErrorKind::NotFound => {
+            return Err(FilesystemError::DestinationStateChanged {
+                path: destination_path.to_owned(),
+            });
+        }
+        (true, Err(cause)) => {
+            return Err(FilesystemError::DestinationMetadata {
+                path: destination_path.to_owned(),
+                source: cause,
+            });
+        }
+        (false, Ok(_)) => {
+            return Err(FilesystemError::DestinationStateChanged {
+                path: destination_path.to_owned(),
+            });
+        }
+        (false, Err(cause)) if cause.kind() == io::ErrorKind::NotFound => {
+            if !destination.may_create_after_confirmation() {
+                return Err(FilesystemError::DestinationCreationNotAllowed {
+                    path: destination_path.to_owned(),
+                });
+            }
+            validate_missing_destination_parent(destination_path)?;
+        }
+        (false, Err(cause)) => {
+            return Err(FilesystemError::DestinationMetadata {
+                path: destination_path.to_owned(),
+                source: cause,
+            });
+        }
+    }
+
+    let mut source_folders = Vec::new();
+    for operation in plan.operations() {
+        if source_folders
+            .iter()
+            .any(|folder: &PathBuf| paths_equivalent(folder, operation.source_folder()))
+        {
+            continue;
+        }
+        if paths_equivalent(destination_path, operation.source_folder())
+            || path_is_same_or_descendant(destination_path, operation.source_folder())
+        {
+            return Err(FilesystemError::DestinationIsSelectedSource {
+                path: destination_path.to_owned(),
+            });
+        }
+        source_folders.push(operation.source_folder().to_owned());
+    }
+
+    if paths_equivalent(destination_path, plan.source_root().path()) {
+        return Err(FilesystemError::DestinationIsSourceRoot {
+            path: destination_path.to_owned(),
+        });
+    }
+
+    Ok(())
+}
+
+fn validate_source_folder(path: &Path) -> Result<(), FilesystemError> {
+    let metadata = fs::symlink_metadata(path).map_err(|cause| {
+        if cause.kind() == io::ErrorKind::NotFound {
+            FilesystemError::SourceFolderNotFound {
+                path: path.to_owned(),
+            }
+        } else {
+            FilesystemError::SourceMetadata {
+                path: path.to_owned(),
+                cause,
+            }
+        }
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(FilesystemError::SourceFolderInvalid {
+            path: path.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_source_operation(operation: &PlannedOperation) -> Result<(), FilesystemError> {
+    let extension = source_video_extension(operation.source_path())?;
+    if extension != *operation.source_extension() {
+        return Err(FilesystemError::SourceExtensionChanged {
+            path: operation.source_path().to_owned(),
+            expected: operation.source_extension().to_string(),
+            actual: extension.to_string(),
+        });
+    }
+
+    let snapshot = snapshot_source_file(operation.source_path())?;
+    if snapshot != *operation.source_snapshot() {
+        return Err(FilesystemError::SourceChanged {
+            path: operation.source_path().to_owned(),
+        });
+    }
+
+    Ok(())
+}
+
+fn validate_destination_path(
+    plan: &OperationPlan,
+    operation: &PlannedOperation,
+) -> Result<(), FilesystemError> {
+    let destination = plan.destination().path();
+    let destination_path = operation.destination_path();
+    let Some(parent) = destination_path.parent() else {
+        return Err(FilesystemError::DestinationEscapes {
+            path: destination_path.to_owned(),
+        });
+    };
+    if !paths_equivalent(parent, destination)
+        || destination_path.file_name().and_then(|name| name.to_str())
+            != Some(operation.normalized_filename())
+    {
+        return Err(FilesystemError::DestinationEscapes {
+            path: destination_path.to_owned(),
+        });
+    }
+    if paths_equivalent(operation.source_path(), destination_path) {
+        return Err(FilesystemError::SourceDestinationSame {
+            path: destination_path.to_owned(),
+        });
+    }
+
+    match fs::symlink_metadata(destination_path) {
+        Ok(_) => Err(FilesystemError::DestinationAlreadyExists {
+            path: destination_path.to_owned(),
+        }),
+        Err(cause) if cause.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(cause) => Err(FilesystemError::DestinationMetadata {
+            path: destination_path.to_owned(),
+            source: cause,
+        }),
+    }
+}
+
+fn ensure_destination_writable(
+    destination: &Path,
+    metadata: &fs::Metadata,
+) -> Result<(), FilesystemError> {
+    if metadata.permissions().readonly() {
+        return Err(FilesystemError::DestinationNotWritable {
+            path: destination.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn execute_validated_move_plan<F>(
+    plan: &OperationPlan,
+    mode: MoveMode,
+    mut before_operation: F,
+) -> ExecutionReport
+where
+    F: FnMut(usize),
+{
+    let mut statuses = vec![OperationStatus::Pending; plan.operation_count()];
+    if let Err(error) = ensure_destination_at_commit(plan) {
+        statuses[0] = OperationStatus::Failed {
+            reason: error.to_string(),
+        };
+        return report_for_statuses(plan, statuses);
+    }
+
+    for (index, operation) in plan.operations().iter().enumerate() {
+        before_operation(index);
+
+        if let Err(error) = validate_operation_at_commit(plan, operation) {
+            statuses[index] = OperationStatus::Failed {
+                reason: error.to_string(),
+            };
+            break;
+        }
+
+        match move_operation(operation, mode) {
+            Ok(()) => statuses[index] = OperationStatus::Completed,
+            Err(error) => {
+                statuses[index] = OperationStatus::Failed {
+                    reason: error.to_string(),
+                };
+                break;
+            }
+        }
+    }
+
+    report_for_statuses(plan, statuses)
+}
+
+fn report_for_statuses(plan: &OperationPlan, statuses: Vec<OperationStatus>) -> ExecutionReport {
+    let results = plan
+        .operations()
+        .iter()
+        .zip(statuses)
+        .map(|(operation, status)| {
+            OperationResult::new(
+                operation.source_path().to_owned(),
+                operation.destination_path().to_owned(),
+                status,
+            )
+        })
+        .collect();
+    ExecutionReport::new(plan.source_root().clone(), results)
+}
+
+fn ensure_destination_at_commit(plan: &OperationPlan) -> Result<(), FilesystemError> {
+    let destination = plan.destination();
+    match fs::symlink_metadata(destination.path()) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                return Err(FilesystemError::DestinationSymlink {
+                    path: destination.path().to_owned(),
+                });
+            }
+            if !metadata.is_dir() {
+                return Err(FilesystemError::DestinationUnsupportedType {
+                    path: destination.path().to_owned(),
+                });
+            }
+            ensure_destination_writable(destination.path(), &metadata)
+        }
+        Err(cause) if cause.kind() == io::ErrorKind::NotFound => {
+            if !destination.may_create_after_confirmation() {
+                return Err(FilesystemError::DestinationCreationNotAllowed {
+                    path: destination.path().to_owned(),
+                });
+            }
+            validate_missing_destination_parent(destination.path())?;
+            fs::create_dir(destination.path()).map_err(|cause| {
+                FilesystemError::DestinationCreation {
+                    path: destination.path().to_owned(),
+                    cause,
+                }
+            })?;
+            let metadata = fs::symlink_metadata(destination.path()).map_err(|cause| {
+                FilesystemError::DestinationCreation {
+                    path: destination.path().to_owned(),
+                    cause,
+                }
+            })?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(FilesystemError::DestinationUnsupportedType {
+                    path: destination.path().to_owned(),
+                });
+            }
+            ensure_destination_writable(destination.path(), &metadata)
+        }
+        Err(cause) => Err(FilesystemError::DestinationMetadata {
+            path: destination.path().to_owned(),
+            source: cause,
+        }),
+    }
+}
+
+fn validate_operation_at_commit(
+    plan: &OperationPlan,
+    operation: &PlannedOperation,
+) -> Result<(), FilesystemError> {
+    validate_source_folder(operation.source_folder())?;
+    validate_source_operation(operation)?;
+    validate_destination_path(plan, operation)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MoveMode {
+    Automatic,
+    #[cfg(test)]
+    SameVolume,
+    #[cfg(test)]
+    CrossVolume,
+}
+
+fn move_operation(operation: &PlannedOperation, mode: MoveMode) -> Result<(), FilesystemError> {
+    match mode {
+        MoveMode::Automatic => match move_same_volume(operation) {
+            Ok(()) => Ok(()),
+            Err(error) if is_cross_device_error(&error) => move_cross_volume(operation),
+            Err(error) => Err(error),
+        },
+        #[cfg(test)]
+        MoveMode::SameVolume => move_same_volume(operation),
+        #[cfg(test)]
+        MoveMode::CrossVolume => move_cross_volume(operation),
+    }
+}
+
+fn move_same_volume(operation: &PlannedOperation) -> Result<(), FilesystemError> {
+    match fs::hard_link(operation.source_path(), operation.destination_path()) {
+        Ok(()) => {
+            validate_source_operation(operation)?;
+            fs::remove_file(operation.source_path()).map_err(|cause| {
+                FilesystemError::SourceRemoval {
+                    path: operation.source_path().to_owned(),
+                    cause,
+                }
+            })
+        }
+        Err(cause) if cause.kind() == io::ErrorKind::AlreadyExists => {
+            Err(FilesystemError::DestinationAlreadyExists {
+                path: operation.destination_path().to_owned(),
+            })
+        }
+        Err(cause) => Err(FilesystemError::SameVolumeMove {
+            source_path: operation.source_path().to_owned(),
+            destination: operation.destination_path().to_owned(),
+            cause,
+        }),
+    }
+}
+
+fn move_cross_volume(operation: &PlannedOperation) -> Result<(), FilesystemError> {
+    let destination_directory = operation.destination_path().parent().ok_or_else(|| {
+        FilesystemError::DestinationEscapes {
+            path: operation.destination_path().to_owned(),
+        }
+    })?;
+    let (temporary_path, temporary_file) =
+        create_temporary_file(destination_directory).map_err(|cause| {
+            FilesystemError::CrossVolumeCopy {
+                source_path: operation.source_path().to_owned(),
+                destination: operation.destination_path().to_owned(),
+                reason: format!("could not create a destination-side temporary file: {cause}"),
+            }
+        })?;
+
+    let copy_result = copy_and_publish_cross_volume(operation, &temporary_path, temporary_file);
+
+    if copy_result.is_err()
+        && let Err(cleanup_cause) = fs::remove_file(&temporary_path)
+        && cleanup_cause.kind() != io::ErrorKind::NotFound
+    {
+        return Err(FilesystemError::TemporaryCleanup {
+            path: temporary_path,
+            cause: cleanup_cause,
+        });
+    }
+
+    copy_result
+}
+
+fn copy_and_publish_cross_volume(
+    operation: &PlannedOperation,
+    temporary_path: &Path,
+    mut temporary_file: File,
+) -> Result<(), FilesystemError> {
+    let mut source_file =
+        File::open(operation.source_path()).map_err(|cause| FilesystemError::CrossVolumeCopy {
+            source_path: operation.source_path().to_owned(),
+            destination: operation.destination_path().to_owned(),
+            reason: format!("could not open the source: {cause}"),
+        })?;
+    let copied_bytes = io::copy(&mut source_file, &mut temporary_file).map_err(|cause| {
+        FilesystemError::CrossVolumeCopy {
+            source_path: operation.source_path().to_owned(),
+            destination: operation.destination_path().to_owned(),
+            reason: format!("copy failed: {cause}"),
+        }
+    })?;
+    temporary_file
+        .flush()
+        .map_err(|cause| FilesystemError::CrossVolumeCopy {
+            source_path: operation.source_path().to_owned(),
+            destination: operation.destination_path().to_owned(),
+            reason: format!("could not flush the temporary copy: {cause}"),
+        })?;
+    temporary_file
+        .sync_all()
+        .map_err(|cause| FilesystemError::CrossVolumeCopy {
+            source_path: operation.source_path().to_owned(),
+            destination: operation.destination_path().to_owned(),
+            reason: format!("could not synchronize the temporary copy: {cause}"),
+        })?;
+    drop(source_file);
+    drop(temporary_file);
+
+    let temporary_metadata =
+        fs::metadata(temporary_path).map_err(|cause| FilesystemError::CopyVerification {
+            source_path: operation.source_path().to_owned(),
+            destination: operation.destination_path().to_owned(),
+            reason: format!("could not inspect the temporary copy: {cause}"),
+        })?;
+    if copied_bytes != operation.source_snapshot().size_bytes()
+        || temporary_metadata.len() != operation.source_snapshot().size_bytes()
+    {
+        return Err(FilesystemError::CopyVerification {
+            source_path: operation.source_path().to_owned(),
+            destination: operation.destination_path().to_owned(),
+            reason: "the copied byte count does not match the planned source size".to_owned(),
+        });
+    }
+    if let Err(error) = validate_source_operation(operation) {
+        return Err(FilesystemError::CopyVerification {
+            source_path: operation.source_path().to_owned(),
+            destination: operation.destination_path().to_owned(),
+            reason: format!("the source changed while it was being copied: {error}"),
+        });
+    }
+
+    match fs::hard_link(temporary_path, operation.destination_path()) {
+        Ok(()) => {}
+        Err(cause) if cause.kind() == io::ErrorKind::AlreadyExists => {
+            return Err(FilesystemError::DestinationAlreadyExists {
+                path: operation.destination_path().to_owned(),
+            });
+        }
+        Err(cause) => {
+            return Err(FilesystemError::DestinationPublication {
+                path: operation.destination_path().to_owned(),
+                cause,
+            });
+        }
+    }
+
+    fs::remove_file(temporary_path).map_err(|cause| FilesystemError::TemporaryCleanup {
+        path: temporary_path.to_owned(),
+        cause,
+    })?;
+    fs::remove_file(operation.source_path()).map_err(|cause| FilesystemError::SourceRemoval {
+        path: operation.source_path().to_owned(),
+        cause,
+    })
+}
+
+fn create_temporary_file(directory: &Path) -> io::Result<(PathBuf, File)> {
+    for attempt in 0..64_u32 {
+        let id = NEXT_TEMP_FILE_ID.fetch_add(1, AtomicOrdering::Relaxed);
+        let filename = format!(
+            ".title-tmdb-file.{}.{}.{}.tmp",
+            std::process::id(),
+            id,
+            attempt
+        );
+        let path = directory.join(filename);
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => return Ok((path, file)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not allocate a unique temporary filename",
+    ))
+}
+
+fn is_cross_device_error(error: &FilesystemError) -> bool {
+    match error {
+        FilesystemError::SameVolumeMove { cause, .. } => {
+            cause.kind() == io::ErrorKind::CrossesDevices || {
+                #[cfg(unix)]
+                {
+                    cause.raw_os_error() == Some(18)
+                }
+                #[cfg(windows)]
+                {
+                    cause.raw_os_error() == Some(17)
+                }
+                #[cfg(not(any(unix, windows)))]
+                {
+                    false
+                }
+            }
+        }
+        _ => false,
+    }
+}
+
 fn validate_missing_destination_parent(path: &Path) -> Result<(), FilesystemError> {
     let mut current = path
         .parent()
@@ -504,6 +1128,51 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    fn tmdb_movie(title: &str) -> crate::domain::TmdbItem {
+        crate::domain::TmdbItem {
+            id: crate::domain::TmdbId::new(550).unwrap(),
+            media_type: crate::domain::MediaType::Movie,
+            title: title.to_owned(),
+            original_title: Some(title.to_owned()),
+            year: Some(1999),
+        }
+    }
+
+    fn planned_operation(
+        source_folder: &Path,
+        source_path: &Path,
+        destination: &Path,
+        filename: &str,
+    ) -> PlannedOperation {
+        PlannedOperation::new(
+            source_folder.to_owned(),
+            source_path.to_owned(),
+            destination.join(filename),
+            filename.to_owned(),
+            tmdb_movie(filename),
+            None,
+            source_video_extension(source_path).unwrap(),
+            snapshot_source_file(source_path).unwrap(),
+        )
+    }
+
+    fn operation_plan(
+        source_root_path: &Path,
+        destination: &Path,
+        destination_exists: bool,
+        operations: Vec<PlannedOperation>,
+    ) -> OperationPlan {
+        OperationPlan::new(
+            SourceRoot::new(source_root_path.to_owned()),
+            DestinationSelection::new(
+                destination.to_owned(),
+                destination_exists,
+                !destination_exists,
+            ),
+            operations,
+        )
+    }
 
     fn source_root(path: &Path) -> SourceRoot {
         SourceRoot::new(path.to_path_buf())
@@ -771,5 +1440,293 @@ mod tests {
             error,
             FilesystemError::DestinationIsSelectedSource { .. }
         ));
+    }
+
+    #[test]
+    fn same_volume_execution_moves_contents_without_overwriting_an_existing_file() {
+        let directory = tempdir().unwrap();
+        let source_folder = directory.path().join("source");
+        let destination = directory.path().join("organized");
+        let source = source_folder.join("movie.MKV");
+        let final_name = "550 - Fight Club.mkv";
+        fs::create_dir(&source_folder).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(&source, "video bytes").unwrap();
+
+        let plan = operation_plan(
+            directory.path(),
+            &destination,
+            true,
+            vec![planned_operation(
+                &source_folder,
+                &source,
+                &destination,
+                final_name,
+            )],
+        );
+
+        let report = execute_validated_move_plan(&plan, MoveMode::SameVolume, |_| {});
+
+        assert!(report.is_success());
+        assert!(!source.exists());
+        assert_eq!(
+            fs::read_to_string(destination.join(final_name)).unwrap(),
+            "video bytes"
+        );
+    }
+
+    #[test]
+    fn an_existing_destination_is_rejected_before_any_file_is_changed() {
+        let directory = tempdir().unwrap();
+        let source_folder = directory.path().join("source");
+        let destination = directory.path().join("organized");
+        let source = source_folder.join("movie.mkv");
+        let final_name = "550 - Fight Club.mkv";
+        let conflicting_destination = destination.join(final_name);
+        fs::create_dir(&source_folder).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(&source, "source bytes").unwrap();
+        fs::write(&conflicting_destination, "existing bytes").unwrap();
+
+        let plan = operation_plan(
+            directory.path(),
+            &destination,
+            true,
+            vec![planned_operation(
+                &source_folder,
+                &source,
+                &destination,
+                final_name,
+            )],
+        );
+
+        let error = validate_move_plan(&plan).unwrap_err();
+
+        assert!(matches!(
+            error,
+            FilesystemError::DestinationAlreadyExists { .. }
+        ));
+        assert!(source.exists());
+        assert_eq!(
+            fs::read_to_string(conflicting_destination).unwrap(),
+            "existing bytes"
+        );
+    }
+
+    #[test]
+    fn a_missing_destination_is_created_only_after_execution_begins() {
+        let directory = tempdir().unwrap();
+        let source_folder = directory.path().join("source");
+        let destination = directory.path().join("new-organized");
+        let source = source_folder.join("movie.mp4");
+        let final_name = "550 - Fight Club.mp4";
+        fs::create_dir(&source_folder).unwrap();
+        fs::write(&source, "source bytes").unwrap();
+
+        let plan = operation_plan(
+            directory.path(),
+            &destination,
+            false,
+            vec![planned_operation(
+                &source_folder,
+                &source,
+                &destination,
+                final_name,
+            )],
+        );
+
+        validate_move_plan(&plan).unwrap();
+        assert!(!destination.exists());
+
+        let report = execute_move_plan(&plan).unwrap();
+
+        assert!(report.is_success());
+        assert!(destination.is_dir());
+        assert!(!source.exists());
+        assert_eq!(
+            fs::read_to_string(destination.join(final_name)).unwrap(),
+            "source bytes"
+        );
+    }
+
+    #[test]
+    fn a_changed_source_is_rejected_without_mutation() {
+        let directory = tempdir().unwrap();
+        let source_folder = directory.path().join("source");
+        let destination = directory.path().join("organized");
+        let source = source_folder.join("movie.mkv");
+        fs::create_dir(&source_folder).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(&source, "original").unwrap();
+
+        let plan = operation_plan(
+            directory.path(),
+            &destination,
+            true,
+            vec![planned_operation(
+                &source_folder,
+                &source,
+                &destination,
+                "550 - Fight Club.mkv",
+            )],
+        );
+        fs::write(&source, "the source changed after selection").unwrap();
+
+        let error = validate_move_plan(&plan).unwrap_err();
+
+        assert!(matches!(error, FilesystemError::SourceChanged { .. }));
+        assert!(source.exists());
+        assert!(fs::read_dir(&destination).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn duplicate_destinations_are_rejected_before_execution() {
+        let directory = tempdir().unwrap();
+        let source_folder = directory.path().join("source");
+        let destination = directory.path().join("organized");
+        let first_source = source_folder.join("first.mkv");
+        let second_source = source_folder.join("second.mkv");
+        fs::create_dir(&source_folder).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(&first_source, "first").unwrap();
+        fs::write(&second_source, "second").unwrap();
+        let final_name = "550 - Same Title.mkv";
+
+        let plan = operation_plan(
+            directory.path(),
+            &destination,
+            true,
+            vec![
+                planned_operation(&source_folder, &first_source, &destination, final_name),
+                planned_operation(&source_folder, &second_source, &destination, final_name),
+            ],
+        );
+
+        let error = validate_move_plan(&plan).unwrap_err();
+
+        assert!(matches!(
+            error,
+            FilesystemError::DuplicateDestination { .. }
+        ));
+        assert!(first_source.exists());
+        assert!(second_source.exists());
+    }
+
+    #[test]
+    fn cross_volume_execution_verifies_and_publishes_the_copy_before_removing_source() {
+        let directory = tempdir().unwrap();
+        let source_folder = directory.path().join("source");
+        let destination = directory.path().join("organized");
+        let source = source_folder.join("movie.webm");
+        let final_name = "550 - Fight Club.webm";
+        fs::create_dir(&source_folder).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(&source, "cross volume video bytes").unwrap();
+
+        let plan = operation_plan(
+            directory.path(),
+            &destination,
+            true,
+            vec![planned_operation(
+                &source_folder,
+                &source,
+                &destination,
+                final_name,
+            )],
+        );
+        validate_move_plan(&plan).unwrap();
+
+        let report = execute_validated_move_plan(&plan, MoveMode::CrossVolume, |_| {});
+
+        assert!(report.is_success());
+        assert!(!source.exists());
+        assert_eq!(
+            fs::read_to_string(destination.join(final_name)).unwrap(),
+            "cross volume video bytes"
+        );
+        assert!(!contains_temporary_file(&destination));
+    }
+
+    #[test]
+    fn cross_volume_verification_failure_preserves_source_and_cleans_temporary_copy() {
+        let directory = tempdir().unwrap();
+        let source_folder = directory.path().join("source");
+        let destination = directory.path().join("organized");
+        let source = source_folder.join("movie.mkv");
+        let final_name = "550 - Fight Club.mkv";
+        fs::create_dir(&source_folder).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(&source, "video bytes").unwrap();
+
+        let extension = source_video_extension(&source).unwrap();
+        let snapshot = snapshot_source_file(&source).unwrap();
+        let operation = PlannedOperation::new(
+            source_folder.clone(),
+            source.clone(),
+            destination.join(final_name),
+            final_name.to_owned(),
+            tmdb_movie("Fight Club"),
+            None,
+            extension,
+            FileSnapshot::new(snapshot.size_bytes() + 1, snapshot.modified()),
+        );
+
+        let error = move_cross_volume(&operation).unwrap_err();
+
+        assert!(matches!(error, FilesystemError::CopyVerification { .. }));
+        assert!(source.exists());
+        assert!(!destination.join(final_name).exists());
+        assert!(!contains_temporary_file(&destination));
+    }
+
+    #[test]
+    fn execution_stops_after_a_late_conflict_and_reports_pending_operations() {
+        let directory = tempdir().unwrap();
+        let source_folder = directory.path().join("source");
+        let destination = directory.path().join("organized");
+        let sources = [
+            source_folder.join("first.mkv"),
+            source_folder.join("second.mkv"),
+            source_folder.join("third.mkv"),
+        ];
+        let names = ["550 - First.mkv", "550 - Second.mkv", "550 - Third.mkv"];
+        fs::create_dir(&source_folder).unwrap();
+        fs::create_dir(&destination).unwrap();
+        for (source, content) in sources.iter().zip(["first", "second", "third"]) {
+            fs::write(source, content).unwrap();
+        }
+
+        let operations = sources
+            .iter()
+            .zip(names)
+            .map(|(source, name)| planned_operation(&source_folder, source, &destination, name))
+            .collect();
+        let plan = operation_plan(directory.path(), &destination, true, operations);
+        validate_move_plan(&plan).unwrap();
+        let late_conflict = plan.operations()[1].destination_path().to_owned();
+
+        let report = execute_validated_move_plan(&plan, MoveMode::SameVolume, |index| {
+            if index == 1 {
+                fs::write(&late_conflict, "late conflict").unwrap();
+            }
+        });
+
+        assert_eq!(report.completed_count(), 1);
+        assert_eq!(report.failed_count(), 1);
+        assert_eq!(report.pending_count(), 1);
+        assert!(!sources[0].exists());
+        assert!(sources[1].exists());
+        assert!(sources[2].exists());
+        assert_eq!(fs::read_to_string(late_conflict).unwrap(), "late conflict");
+    }
+
+    fn contains_temporary_file(directory: &Path) -> bool {
+        fs::read_dir(directory).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".title-tmdb-file.")
+        })
     }
 }

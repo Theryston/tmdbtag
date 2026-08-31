@@ -2,7 +2,7 @@
 
 Modern, polished, and highly interactive CLI for organizing video files using the identifier and title registered in [The Movie Database (TMDB)](https://www.themoviedb.org/).
 
-> Status: MVP in progress. The CLI foundation, persisted startup configuration, TMDB identification boundary, and non-mutating filesystem discovery/media selection are implemented. Naming, planning, and file movement remain for the following tasks.
+> Status: The documented interactive MVP workflow is implemented through plan construction, preview, safe movement, and per-file reporting. Future retrieval commands, non-interactive modes, and auxiliary-file support remain out of scope until separately specified.
 
 This README is the source of truth for the expected behavior. Any implementation, flow change, or new feature must be compared against this document before it is incorporated.
 
@@ -41,8 +41,8 @@ The program is run inside a folder that contains other folders with video files.
 5. allow one or more folders to be selected;
 6. recursively list recognized video files in each selected folder and its real subfolders;
 7. allow one or more video files to be selected;
-8. allow a movie or TV series to be identified by searching TMDB or entering an ID manually;
-9. ask for the season and episode when the item is a TV series;
+8. identify every selected video file as a movie or TV series by searching TMDB or entering an ID manually;
+9. ask for the season and episode for each selected video identified as a TV series;
 10. show a complete operation plan;
 11. move the selected files to the destination folder, renaming them with enough data to locate the item in TMDB again.
 
@@ -66,6 +66,7 @@ The program must not alter the video contents. Its job is to organize: select, r
 - A `config` command that deliberately reopens both configuration fields.
 - Manual identification by numeric TMDB ID.
 - Support for movies and TV series.
+- A complete TMDB identification loop for every selected video file, including files in the same source folder.
 - Manual season and episode input for each series file.
 - Plan preview before any change is made to disk.
 - Actual file movement rather than an implicit copy.
@@ -84,7 +85,6 @@ The program must not alter the video contents. Its job is to organize: select, r
 - Synchronizing data with an external library.
 - Maintaining a local database.
 - Overwriting or replacing existing files.
-- Processing multiple different movies or series inside the same source folder.
 - Following symbolic links during discovery.
 - Operating without interactive confirmation.
 
@@ -107,13 +107,19 @@ These items may be considered in the future, but they must not be implemented im
 
 ### Unit-of-work rule
 
-Each source folder represents one TMDB item.
+Each selected video file represents one independent TMDB identification unit. The source folder is
+selection context and does not determine the metadata assigned to every file inside it.
 
-- A movie folder must have exactly one selected video file.
-- A series folder may have one or more selected video files; each file represents an episode of the same series.
-- If different movies or series are in the same folder, the user must separate them into different folders or run the program again for each group.
+- Every selected video runs the complete identification loop: choose search or manual ID, resolve
+  and confirm the TMDB item, and then continue to naming.
+- A movie file produces one movie operation and does not need an episode reference.
+- A series file produces one episode operation after its season and episode are individually
+  validated against TMDB.
+- Multiple files in the same source folder may represent different movies, different series, or
+  multiple episodes of the same series.
 
-This rule prevents one prompt from assigning incorrect metadata to files belonging to different works.
+This rule prevents one prompt from assigning the same metadata to files that may belong to
+different works while preserving the convenient folder-based file selection step.
 
 ## Main Flow
 
@@ -143,8 +149,9 @@ Select one or more source folders
         v
 For each folder:
   recursively select video files
-  identify a movie or series in TMDB
-  if it is a series, enter season/episode per file
+  for each selected video:
+    identify a movie or series in TMDB
+    if it is a series, enter season/episode for that video
         |
         v
 Validate all paths and conflicts
@@ -378,11 +385,12 @@ When the user chooses to enter an ID:
 - reject IDs that do not exist or do not match the selected type;
 - show the returned title and ask for confirmation;
 - never accept a manually entered title as a substitute for TMDB data;
-- if the confirmed type is movie and more than one file was selected, reject the plan and request a selection containing exactly one file.
+- repeat this complete identification flow independently for every selected video file, including
+  multiple files from the same source folder.
 
 ### 8. Series episode data
 
-For each selected video file belonging to a series, ask for:
+After a selected video file has been identified as a series, ask for:
 
 - the season number;
 - the episode number.
@@ -396,6 +404,9 @@ Rules:
 - ask for the data individually even when multiple files belong to the same series;
 - allow the input to be corrected before the preview;
 - do not infer these numbers from the original filename in the MVP.
+
+TMDB identification is repeated for every selected video file. Files in the same source folder do
+not implicitly share a series or movie selection; the user confirms the metadata for each file.
 
 Example:
 
@@ -775,6 +786,11 @@ When they are on different volumes, the implementation must:
 
 The temporary file must never appear under the final name before the copy is ready. If the copy cannot be verified, preserve the source and report the failure.
 
+The current filesystem adapter implements same-volume publication with a no-replace hard link
+followed by source removal. Automatic execution uses the cross-volume temporary-copy path when the
+operating system reports a cross-device error. If the host filesystem cannot provide the required
+no-replace primitive, the operation fails closed instead of falling back to an overwriting rename.
+
 ### Failures during execution
 
 The complete plan must be pre-validated, but execution does not need to be transactional across volumes.
@@ -1038,22 +1054,22 @@ The MVP is complete only when all of the following criteria are met:
 - [x] Recursively list recognized video files from each selected folder and its real subfolders.
 - [x] Show filesystem paths as relative display paths while retaining exact paths internally.
 - [x] Allow multiple-file selection.
-- [ ] Apply the one-TMDB-item-per-folder rule.
+- [x] Run a separate confirmed TMDB identification loop for every selected video file.
 - [x] Search movies and series in real time.
 - [x] Allow the user to enter an ID and type manually.
 - [x] Display the type and title before using the data.
-- [ ] Ask separately for season and episode for each series file.
+- [x] Ask separately for season and episode for each series file.
 - [x] Generate exactly the documented filename pattern.
 - [x] Normalize titles for filenames, including replacing invalid characters such as colon, without losing the ID, season, or episode.
-- [ ] Detect collisions before execution.
-- [ ] Never overwrite an existing destination.
-- [ ] Show a complete preview.
-- [ ] Require explicit confirmation with a negative default.
-- [ ] Move the file while keeping its contents intact.
-- [ ] Preserve the source when an unverified cross-volume copy fails.
-- [ ] Report success, failure, and pending items per file.
+- [x] Detect collisions before execution.
+- [x] Never overwrite an existing destination.
+- [x] Show a complete preview.
+- [x] Require explicit confirmation with a negative default.
+- [x] Move the file while keeping its contents intact.
+- [x] Preserve the source when an unverified cross-volume copy fails.
+- [x] Report success, failure, and pending items per file.
 - [x] Allow the ID, type, and episode to be recovered from the generated filename.
-- [ ] Have automated tests for naming, parsing, validation, and safe movement.
+- [x] Have automated tests for naming, parsing, validation, and safe movement.
 
 ## Testing Strategy
 
@@ -1096,14 +1112,15 @@ Use temporary directories to verify:
 Before a usable release, test at least:
 
 1. one folder containing one movie;
-2. one folder containing multiple episodes of a series;
-3. more than one folder in the same execution;
-4. a destination outside the current directory;
-5. a destination inside the current directory;
-6. a title with characters invalid for filenames;
-7. cancellation during selection and confirmation;
-8. a destination that already contains an identical name;
-9. source and destination on different volumes, when the environment allows it.
+2. one folder containing multiple independent movie files;
+3. one folder containing multiple episodes of a series, with identification repeated per file;
+4. more than one folder in the same execution;
+5. a destination outside the current directory;
+6. a destination inside the current directory;
+7. a title with characters invalid for filenames;
+8. cancellation during selection and confirmation;
+9. a destination that already contains an identical name;
+10. source and destination on different volumes, when the environment allows it.
 
 ## Implementation Tasks
 
@@ -1147,17 +1164,18 @@ The detailed implementation breakdown is maintained in [Implementation Tasks](ta
 
 - [x] Implement domain models.
 - [x] Implement sanitization and filename generation.
-- [ ] Implement preview and conflict detection.
-- [ ] Implement same-volume movement.
-- [ ] Implement safe cross-volume copying.
-- [ ] Implement the final report.
+- [x] Implement independent per-video TMDB identification during plan construction.
+- [x] Implement preview and conflict detection.
+- [x] Implement same-volume movement.
+- [x] Implement safe cross-volume copying.
+- [x] Implement the final report.
 
 ### Phase 4 — Retrieval and extensions
 
 - [x] Implement parsing of generated filenames.
 - [ ] Add a separate command to query metadata from a filename.
 - [ ] Evaluate non-interactive mode and --dry-run.
-- [ ] Evaluate recursive source-folder selection, multiple titles per folder, subtitles, and auxiliary files.
+- [ ] Evaluate recursive source-folder selection, subtitles, and auxiliary files.
 - [ ] Evaluate undo/operation logs without changing the MVP's safe behavior.
 
 ## References

@@ -1,17 +1,70 @@
+use std::collections::HashSet;
+
 use crate::{
     config::{ConfigPromptMode, ConfigStore, StartupConfig, configure_interactively},
     domain::{
-        EpisodeRef, FilesystemSelection, IdentificationMethod, RunOutcome, SelectedSource,
-        SourceFolder, SourceRoot, TmdbId, TmdbItem, TmdbSearchCandidate,
+        EpisodeRef, FilesystemSelection, IdentificationMethod, OperationPlan, PlannedOperation,
+        RunOutcome, SelectedSource, SourceFolder, SourceRoot, TmdbId, TmdbItem,
+        TmdbSearchCandidate,
     },
-    error::{AppError, AppResult, TmdbError, UiError},
+    error::{AppError, AppResult, PlanningError, TmdbError, UiError},
     filesystem::{self, DiscoveryWarning},
+    naming::{generate_movie_filename, generate_series_filename},
     tmdb::client::TmdbClient,
     ui::{InteractiveUi, MessageLevel, TmdbInteraction, display_relative_path},
 };
 
+/// The metadata operations required by the organization workflow.
+pub trait TmdbProvider {
+    /// Searches the movie namespace.
+    fn search_movies(&self, query: &str) -> Result<Vec<TmdbSearchCandidate>, TmdbError>;
+
+    /// Searches the TV-series namespace.
+    fn search_series(&self, query: &str) -> Result<Vec<TmdbSearchCandidate>, TmdbError>;
+
+    /// Fetches verified details for one typed TMDB ID.
+    fn get_item(
+        &self,
+        media_type: crate::domain::MediaType,
+        id: TmdbId,
+    ) -> Result<TmdbItem, TmdbError>;
+
+    /// Validates one series episode against TMDB.
+    fn get_episode_details(
+        &self,
+        series_id: TmdbId,
+        episode: EpisodeRef,
+    ) -> Result<crate::domain::TmdbEpisode, TmdbError>;
+}
+
+impl TmdbProvider for TmdbClient {
+    fn search_movies(&self, query: &str) -> Result<Vec<TmdbSearchCandidate>, TmdbError> {
+        TmdbClient::search_movies(self, query)
+    }
+
+    fn search_series(&self, query: &str) -> Result<Vec<TmdbSearchCandidate>, TmdbError> {
+        TmdbClient::search_series(self, query)
+    }
+
+    fn get_item(
+        &self,
+        media_type: crate::domain::MediaType,
+        id: TmdbId,
+    ) -> Result<TmdbItem, TmdbError> {
+        TmdbClient::get_item(self, media_type, id)
+    }
+
+    fn get_episode_details(
+        &self,
+        series_id: TmdbId,
+        episode: EpisodeRef,
+    ) -> Result<crate::domain::TmdbEpisode, TmdbError> {
+        TmdbClient::get_episode_details(self, series_id, episode)
+    }
+}
+
 /// Runs the default interactive workflow using the current user's configuration file.
-pub fn run<U: InteractiveUi>(ui: &mut U, version: &str) -> AppResult<RunOutcome> {
+pub fn run<U: InteractiveUi + TmdbInteraction>(ui: &mut U, version: &str) -> AppResult<RunOutcome> {
     let store = ConfigStore::for_current_user()?;
     run_with_store(ui, version, &store)
 }
@@ -20,7 +73,7 @@ pub fn run<U: InteractiveUi>(ui: &mut U, version: &str) -> AppResult<RunOutcome>
 ///
 /// The explicit-store boundary keeps orchestration tests isolated from the real home directory
 /// while the production entry point continues to use the documented per-user location.
-pub fn run_with_store<U: InteractiveUi>(
+pub fn run_with_store<U: InteractiveUi + TmdbInteraction>(
     ui: &mut U,
     version: &str,
     store: &ConfigStore,
@@ -37,12 +90,12 @@ fn run_with_store_and_validator<U, F>(
     validate: F,
 ) -> AppResult<RunOutcome>
 where
-    U: InteractiveUi,
+    U: InteractiveUi + TmdbInteraction,
     F: FnMut(&StartupConfig) -> Result<(), TmdbError>,
 {
     ui.show_welcome(version)?;
 
-    let Some(_startup_config) =
+    let Some(startup_config) =
         configure_and_validate(ui, store, ConfigPromptMode::MissingOnly, validate)?
     else {
         ui.show_message(MessageLevel::Info, "Startup configuration canceled.")?;
@@ -50,17 +103,36 @@ where
     };
 
     ui.show_message(MessageLevel::Success, "TMDB configuration is ready.")?;
-    let Some(_filesystem_selection) = collect_filesystem_selection(ui)? else {
-        ui.show_message(MessageLevel::Info, "Filesystem selection canceled.")?;
-        return Ok(RunOutcome::Cancelled);
-    };
-    ui.show_message(MessageLevel::Success, "Filesystem selection is ready.")?;
-    ui.show_message(
-        MessageLevel::Info,
-        "TMDB identification and media organization will continue in the next workflow step.",
-    )?;
+    let client = TmdbClient::new(&startup_config)?;
 
-    Ok(RunOutcome::MediaSelectionReady)
+    loop {
+        let Some(filesystem_selection) = collect_filesystem_selection(ui)? else {
+            ui.show_message(MessageLevel::Info, "Filesystem selection canceled.")?;
+            return Ok(RunOutcome::Cancelled);
+        };
+        ui.show_message(MessageLevel::Success, "Filesystem selection is ready.")?;
+
+        match organize_selection(ui, &filesystem_selection, &client) {
+            Ok(outcome) => return Ok(outcome),
+            Err(error) if is_recoverable_organization_error(&error) => {
+                ui.show_message(MessageLevel::Error, &error.to_string())?;
+                let Some(retry) =
+                    ui.confirm("Restart source selection and rebuild the plan?", true)?
+                else {
+                    return Ok(RunOutcome::Cancelled);
+                };
+                if retry {
+                    continue;
+                }
+                ui.show_message(
+                    MessageLevel::Info,
+                    "Organization canceled. No files were changed.",
+                )?;
+                return Ok(RunOutcome::Cancelled);
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 /// Runs the `config` command, which deliberately reopens both shared configuration prompts.
@@ -377,11 +449,197 @@ fn show_discovery_warnings<U: InteractiveUi>(
     Ok(())
 }
 
-/// Identifies one movie or TV series through the shared interactive TMDB workflow.
-pub fn identify_tmdb_item<U: InteractiveUi + TmdbInteraction>(
+/// Identifies every selected video, builds the complete plan, previews it, and executes it only
+/// after explicit confirmation.
+pub fn organize_selection<U, C>(
     ui: &mut U,
-    client: &TmdbClient,
-) -> AppResult<Option<TmdbItem>> {
+    selection: &FilesystemSelection,
+    client: &C,
+) -> AppResult<RunOutcome>
+where
+    U: InteractiveUi + TmdbInteraction,
+    C: TmdbProvider,
+{
+    ui.show_step(4, 6, "Identify media and validate episodes")?;
+    let Some(plan) = build_operation_plan(ui, selection, client)? else {
+        ui.show_message(
+            MessageLevel::Info,
+            "Organization canceled. No files were changed.",
+        )?;
+        return Ok(RunOutcome::Cancelled);
+    };
+
+    ui.show_step(5, 6, "Review and validate the operation plan")?;
+    filesystem::validate_move_plan(&plan)?;
+    ui.show_plan_preview(&plan)?;
+
+    let Some(confirmed) = ui.confirm(
+        &format!("Move and rename {} files?", plan.operation_count()),
+        false,
+    )?
+    else {
+        ui.show_message(
+            MessageLevel::Info,
+            "Operation canceled. No files were changed.",
+        )?;
+        return Ok(RunOutcome::Cancelled);
+    };
+    if !confirmed {
+        ui.show_message(
+            MessageLevel::Info,
+            "Operation canceled. No files were changed.",
+        )?;
+        return Ok(RunOutcome::Cancelled);
+    }
+
+    ui.show_step(6, 6, "Move and rename files")?;
+    let activity = ui.start_activity("Moving and renaming files...")?;
+    let total = plan.operation_count();
+    let source_root = plan.source_root().path();
+    let execution = filesystem::execute_move_plan_with_progress(&plan, |index, operation| {
+        activity.set_message(&format!(
+            "Moving file {}/{}: {}",
+            index + 1,
+            total,
+            display_relative_path(operation.source_path(), source_root)
+        ));
+    });
+    let report = match execution {
+        Ok(report) => report,
+        Err(error) => {
+            activity.finish_error("File movement could not start safely.");
+            return Err(error.into());
+        }
+    };
+    if report.is_success() {
+        activity.finish_success("All files moved successfully.");
+    } else {
+        activity.finish_error("File movement stopped before every file was completed.");
+    }
+    ui.show_execution_report(&report)?;
+    if report.is_success() {
+        Ok(RunOutcome::Completed)
+    } else {
+        Ok(RunOutcome::PartiallyCompleted)
+    }
+}
+
+fn build_operation_plan<U, C>(
+    ui: &mut U,
+    selection: &FilesystemSelection,
+    client: &C,
+) -> AppResult<Option<OperationPlan>>
+where
+    U: InteractiveUi + TmdbInteraction,
+    C: TmdbProvider,
+{
+    let mut operations = Vec::new();
+    let mut episode_keys = HashSet::new();
+
+    for source in selection.sources() {
+        if source.files().is_empty() {
+            return Err(PlanningError::NoSelectedFiles {
+                folder: source.folder().to_owned(),
+            }
+            .into());
+        }
+
+        for source_path in source.files() {
+            let Some(item) = identify_tmdb_item(ui, client)? else {
+                return Ok(None);
+            };
+
+            let episode = match item.media_type {
+                crate::domain::MediaType::Movie => None,
+                crate::domain::MediaType::Series => {
+                    let file_label =
+                        display_relative_path(source_path, selection.source_root().path());
+                    let episode = loop {
+                        let Some(episode) =
+                            collect_series_episode(ui, client, item.id, &file_label)?
+                        else {
+                            return Ok(None);
+                        };
+                        let key = (item.id, episode);
+                        if episode_keys.insert(key) {
+                            break episode;
+                        }
+
+                        ui.show_message(
+                            MessageLevel::Error,
+                            &format!(
+                                "Series {} episode S{:02}E{:02} was already assigned. Enter a different episode.",
+                                item.id,
+                                episode.season(),
+                                episode.episode()
+                            ),
+                        )?;
+                    };
+                    Some(episode)
+                }
+            };
+
+            operations.push(build_planned_operation(
+                source,
+                source_path,
+                selection.destination().path(),
+                item,
+                episode,
+            )?);
+        }
+    }
+
+    if operations.is_empty() {
+        return Err(PlanningError::EmptyPlan.into());
+    }
+
+    Ok(Some(OperationPlan::new(
+        selection.source_root().clone(),
+        selection.destination().clone(),
+        operations,
+    )))
+}
+
+fn build_planned_operation(
+    source: &SelectedSource,
+    source_path: &std::path::Path,
+    destination: &std::path::Path,
+    item: TmdbItem,
+    episode: Option<EpisodeRef>,
+) -> AppResult<PlannedOperation> {
+    let source_extension = filesystem::source_video_extension(source_path)?;
+    let normalized_filename = match episode {
+        Some(episode) => generate_series_filename(&item, episode, source_extension.as_str())?,
+        None => generate_movie_filename(&item, source_extension.as_str())?,
+    };
+    let source_snapshot = filesystem::snapshot_source_file(source_path)?;
+    let destination_path = destination.join(&normalized_filename);
+
+    Ok(PlannedOperation::new(
+        source.folder().to_owned(),
+        source_path.to_owned(),
+        destination_path,
+        normalized_filename,
+        item,
+        episode,
+        source_extension,
+        source_snapshot,
+    ))
+}
+
+fn is_recoverable_organization_error(error: &AppError) -> bool {
+    matches!(
+        error,
+        AppError::Planning(_) | AppError::Naming(_) | AppError::Filesystem(_)
+    )
+}
+
+/// Identifies one movie or TV series through the shared interactive TMDB workflow.
+pub fn identify_tmdb_item<U, C>(ui: &mut U, client: &C) -> AppResult<Option<TmdbItem>>
+where
+    U: InteractiveUi + TmdbInteraction,
+    C: TmdbProvider,
+{
     let Some(method) = ui.choose_identification_method()? else {
         return Ok(None);
     };
@@ -393,12 +651,16 @@ pub fn identify_tmdb_item<U: InteractiveUi + TmdbInteraction>(
 }
 
 /// Collects and validates one episode reference for a selected series file.
-pub fn collect_series_episode<U: InteractiveUi + TmdbInteraction>(
+pub fn collect_series_episode<U, C>(
     ui: &mut U,
-    client: &TmdbClient,
+    client: &C,
     series_id: TmdbId,
     file_label: &str,
-) -> AppResult<Option<EpisodeRef>> {
+) -> AppResult<Option<EpisodeRef>>
+where
+    U: InteractiveUi + TmdbInteraction,
+    C: TmdbProvider,
+{
     loop {
         let Some((season, episode)) = ui.ask_episode_numbers(file_label)? else {
             return Ok(None);
@@ -432,10 +694,11 @@ pub fn collect_series_episode<U: InteractiveUi + TmdbInteraction>(
     }
 }
 
-fn identify_by_search<U: InteractiveUi + TmdbInteraction>(
-    ui: &mut U,
-    client: &TmdbClient,
-) -> AppResult<Option<TmdbItem>> {
+fn identify_by_search<U, C>(ui: &mut U, client: &C) -> AppResult<Option<TmdbItem>>
+where
+    U: InteractiveUi + TmdbInteraction,
+    C: TmdbProvider,
+{
     loop {
         let Some(query) = ui.ask_search_query()? else {
             return Ok(None);
@@ -522,10 +785,11 @@ fn identify_by_search<U: InteractiveUi + TmdbInteraction>(
     }
 }
 
-fn identify_by_manual_id<U: InteractiveUi + TmdbInteraction>(
-    ui: &mut U,
-    client: &TmdbClient,
-) -> AppResult<Option<TmdbItem>> {
+fn identify_by_manual_id<U, C>(ui: &mut U, client: &C) -> AppResult<Option<TmdbItem>>
+where
+    U: InteractiveUi + TmdbInteraction,
+    C: TmdbProvider,
+{
     loop {
         let Some(media_type) = ui.choose_media_type()? else {
             return Ok(None);
@@ -594,7 +858,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        error::UiResult,
+        domain::{DestinationSelection, ExecutionReport, MediaType, OperationPlan, TmdbEpisode},
+        error::{TmdbError, UiResult},
         ui::{MessageLevel, ProgressOutput},
     };
 
@@ -617,6 +882,13 @@ mod tests {
         destination_input: Option<String>,
         select_many_responses: Vec<Option<Vec<usize>>>,
         confirm_responses: Vec<Option<bool>>,
+        identification_methods: Vec<Option<IdentificationMethod>>,
+        media_types: Vec<Option<MediaType>>,
+        search_queries: Vec<Option<String>>,
+        tmdb_result_indices: Vec<Option<usize>>,
+        tmdb_ids: Vec<Option<String>>,
+        tmdb_confirmations: Vec<Option<bool>>,
+        episode_numbers: Vec<Option<(String, String)>>,
     }
 
     impl InteractiveUi for RecordingUi {
@@ -696,6 +968,138 @@ mod tests {
         fn start_activity(&mut self, _message: &str) -> UiResult<Box<dyn ProgressOutput>> {
             Ok(Box::new(NoopProgress))
         }
+
+        fn show_plan_preview(&mut self, plan: &OperationPlan) -> UiResult<()> {
+            self.events
+                .push(format!("preview:{}", plan.operation_count()));
+            Ok(())
+        }
+
+        fn show_execution_report(&mut self, report: &ExecutionReport) -> UiResult<()> {
+            self.events.push(format!(
+                "report:{}:{}:{}",
+                report.completed_count(),
+                report.failed_count(),
+                report.pending_count()
+            ));
+            Ok(())
+        }
+    }
+
+    impl TmdbInteraction for RecordingUi {
+        fn choose_identification_method(&mut self) -> UiResult<Option<IdentificationMethod>> {
+            Ok(if self.identification_methods.is_empty() {
+                None
+            } else {
+                self.identification_methods.remove(0)
+            })
+        }
+
+        fn choose_media_type(&mut self) -> UiResult<Option<MediaType>> {
+            Ok(if self.media_types.is_empty() {
+                None
+            } else {
+                self.media_types.remove(0)
+            })
+        }
+
+        fn ask_search_query(&mut self) -> UiResult<Option<String>> {
+            Ok(if self.search_queries.is_empty() {
+                None
+            } else {
+                self.search_queries.remove(0)
+            })
+        }
+
+        fn select_tmdb_result(
+            &mut self,
+            _candidates: &[crate::domain::TmdbSearchCandidate],
+        ) -> UiResult<Option<usize>> {
+            Ok(if self.tmdb_result_indices.is_empty() {
+                None
+            } else {
+                self.tmdb_result_indices.remove(0)
+            })
+        }
+
+        fn ask_tmdb_id(&mut self) -> UiResult<Option<String>> {
+            Ok(if self.tmdb_ids.is_empty() {
+                None
+            } else {
+                self.tmdb_ids.remove(0)
+            })
+        }
+
+        fn confirm_tmdb_item(&mut self, _item: &TmdbItem) -> UiResult<Option<bool>> {
+            Ok(if self.tmdb_confirmations.is_empty() {
+                None
+            } else {
+                self.tmdb_confirmations.remove(0)
+            })
+        }
+
+        fn ask_episode_numbers(&mut self, _file_label: &str) -> UiResult<Option<(String, String)>> {
+            Ok(if self.episode_numbers.is_empty() {
+                None
+            } else {
+                self.episode_numbers.remove(0)
+            })
+        }
+
+        fn show_verified_episode(&mut self, episode: &EpisodeRef) -> UiResult<()> {
+            self.events.push(format!(
+                "verified:S{:02}E{:02}",
+                episode.season(),
+                episode.episode()
+            ));
+            Ok(())
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct FakeTmdbProvider {
+        items: Vec<TmdbItem>,
+        episodes: std::collections::HashSet<(TmdbId, EpisodeRef)>,
+    }
+
+    impl TmdbProvider for FakeTmdbProvider {
+        fn search_movies(&self, _query: &str) -> Result<Vec<TmdbSearchCandidate>, TmdbError> {
+            Ok(Vec::new())
+        }
+
+        fn search_series(&self, _query: &str) -> Result<Vec<TmdbSearchCandidate>, TmdbError> {
+            Ok(Vec::new())
+        }
+
+        fn get_item(&self, media_type: MediaType, id: TmdbId) -> Result<TmdbItem, TmdbError> {
+            self.items
+                .iter()
+                .find(|item| item.media_type == media_type && item.id == id)
+                .cloned()
+                .ok_or_else(|| TmdbError::NotFound {
+                    resource: format!("{media_type} {id}"),
+                })
+        }
+
+        fn get_episode_details(
+            &self,
+            series_id: TmdbId,
+            episode: EpisodeRef,
+        ) -> Result<TmdbEpisode, TmdbError> {
+            if self.episodes.contains(&(series_id, episode)) {
+                Ok(TmdbEpisode {
+                    series_id,
+                    episode,
+                    title: None,
+                })
+            } else {
+                Err(TmdbError::EpisodeNotFound {
+                    series_id: series_id.value(),
+                    season: episode.season(),
+                    episode: episode.episode(),
+                })
+            }
+        }
     }
 
     fn run_default_for_test(ui: &mut RecordingUi, store: &ConfigStore) -> AppResult<RunOutcome> {
@@ -723,6 +1127,406 @@ mod tests {
 
     fn run_config_for_test(ui: &mut RecordingUi, store: &ConfigStore) -> AppResult<RunOutcome> {
         run_config_with_store_and_validator(ui, "0.1.0", store, |_| Ok(()))
+    }
+
+    fn movie_item(id: u64, title: &str) -> TmdbItem {
+        TmdbItem {
+            id: TmdbId::new(id).unwrap(),
+            media_type: MediaType::Movie,
+            title: title.to_owned(),
+            original_title: Some(title.to_owned()),
+            year: Some(1999),
+        }
+    }
+
+    fn series_item(id: u64, title: &str) -> TmdbItem {
+        TmdbItem {
+            id: TmdbId::new(id).unwrap(),
+            media_type: MediaType::Series,
+            title: title.to_owned(),
+            original_title: Some(title.to_owned()),
+            year: Some(2011),
+        }
+    }
+
+    fn filesystem_selection(
+        source_root: &std::path::Path,
+        destination: &std::path::Path,
+        destination_exists: bool,
+        sources: Vec<SelectedSource>,
+    ) -> FilesystemSelection {
+        FilesystemSelection::new(
+            SourceRoot::new(source_root.to_owned()),
+            DestinationSelection::new(
+                destination.to_owned(),
+                destination_exists,
+                !destination_exists,
+            ),
+            sources,
+        )
+    }
+
+    fn manual_identification_ui(
+        media_type: MediaType,
+        id: u64,
+        final_confirmation: Option<bool>,
+    ) -> RecordingUi {
+        RecordingUi {
+            identification_methods: vec![Some(IdentificationMethod::ManualId)],
+            media_types: vec![Some(media_type)],
+            tmdb_ids: vec![Some(id.to_string())],
+            tmdb_confirmations: vec![Some(true)],
+            confirm_responses: vec![final_confirmation],
+            ..RecordingUi::default()
+        }
+    }
+
+    #[test]
+    fn multiple_source_folders_get_independent_confirmed_items_in_one_plan() {
+        let directory = tempdir().unwrap();
+        let first_folder = directory.path().join("first-movie");
+        let second_folder = directory.path().join("second-movie");
+        let destination = directory.path().join("organized");
+        let first_file = first_folder.join("first.mkv");
+        let second_file = second_folder.join("second.mp4");
+        fs::create_dir(&first_folder).unwrap();
+        fs::create_dir(&second_folder).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(&first_file, "first movie").unwrap();
+        fs::write(&second_file, "second movie").unwrap();
+
+        let client = FakeTmdbProvider {
+            items: vec![
+                movie_item(550, "Fight Club"),
+                movie_item(680, "Pulp Fiction"),
+            ],
+            ..FakeTmdbProvider::default()
+        };
+        let mut ui = RecordingUi {
+            identification_methods: vec![
+                Some(IdentificationMethod::ManualId),
+                Some(IdentificationMethod::ManualId),
+            ],
+            media_types: vec![Some(MediaType::Movie), Some(MediaType::Movie)],
+            tmdb_ids: vec![Some("550".to_owned()), Some("680".to_owned())],
+            tmdb_confirmations: vec![Some(true), Some(true)],
+            confirm_responses: vec![Some(true)],
+            ..RecordingUi::default()
+        };
+        let selection = filesystem_selection(
+            directory.path(),
+            &destination,
+            true,
+            vec![
+                SelectedSource::new(first_folder, vec![first_file.clone()]),
+                SelectedSource::new(second_folder, vec![second_file.clone()]),
+            ],
+        );
+
+        let outcome = organize_selection(&mut ui, &selection, &client).unwrap();
+
+        assert_eq!(outcome, RunOutcome::Completed);
+        assert!(!first_file.exists());
+        assert!(!second_file.exists());
+        assert_eq!(
+            fs::read_to_string(destination.join("550 - Fight Club.mkv")).unwrap(),
+            "first movie"
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join("680 - Pulp Fiction.mp4")).unwrap(),
+            "second movie"
+        );
+        assert!(ui.events.iter().any(|event| event == "preview:2"));
+        assert!(ui.events.iter().any(|event| event == "report:2:0:0"));
+    }
+
+    #[test]
+    fn a_confirmed_movie_is_planned_previewed_and_moved_with_its_original_extension() {
+        let directory = tempdir().unwrap();
+        let source_folder = directory.path().join("movies");
+        let destination = directory.path().join("organized");
+        let source_file = source_folder.join("movie.MP4");
+        fs::create_dir(&source_folder).unwrap();
+        fs::write(&source_file, "movie contents").unwrap();
+
+        let item = movie_item(550, "Mission: Impossible");
+        let client = FakeTmdbProvider {
+            items: vec![item],
+            ..FakeTmdbProvider::default()
+        };
+        let mut ui = manual_identification_ui(MediaType::Movie, 550, Some(true));
+        let selection = filesystem_selection(
+            directory.path(),
+            &destination,
+            false,
+            vec![SelectedSource::new(
+                source_folder.clone(),
+                vec![source_file.clone()],
+            )],
+        );
+
+        let outcome = organize_selection(&mut ui, &selection, &client).unwrap();
+
+        assert_eq!(outcome, RunOutcome::Completed);
+        assert!(!source_file.exists());
+        assert_eq!(
+            fs::read_to_string(destination.join("550 - Mission - Impossible.mp4")).unwrap(),
+            "movie contents"
+        );
+        assert!(ui.events.iter().any(|event| event == "preview:1"));
+        assert!(ui.events.iter().any(|event| event == "report:1:0:0"));
+    }
+
+    #[test]
+    fn a_series_builds_one_operation_per_file_and_validates_each_episode() {
+        let directory = tempdir().unwrap();
+        let source_folder = directory.path().join("series");
+        let destination = directory.path().join("organized");
+        let first_file = source_folder.join("episode-01.MKV");
+        let second_file = source_folder.join("season-01").join("episode-02.mp4");
+        fs::create_dir(&source_folder).unwrap();
+        fs::create_dir(second_file.parent().unwrap()).unwrap();
+        fs::write(&first_file, "episode one").unwrap();
+        fs::write(&second_file, "episode two").unwrap();
+        fs::create_dir(&destination).unwrap();
+
+        let id = TmdbId::new(1399).unwrap();
+        let client = FakeTmdbProvider {
+            items: vec![series_item(1399, "Game: Of Thrones")],
+            episodes: [(id, EpisodeRef::new(1, 1)), (id, EpisodeRef::new(1, 2))]
+                .into_iter()
+                .collect(),
+        };
+        let mut ui = manual_identification_ui(MediaType::Series, 1399, Some(true));
+        ui.identification_methods = vec![
+            Some(IdentificationMethod::ManualId),
+            Some(IdentificationMethod::ManualId),
+        ];
+        ui.media_types = vec![Some(MediaType::Series), Some(MediaType::Series)];
+        ui.tmdb_ids = vec![Some("1399".to_owned()), Some("1399".to_owned())];
+        ui.tmdb_confirmations = vec![Some(true), Some(true)];
+        ui.episode_numbers = vec![
+            Some(("1".to_owned(), "1".to_owned())),
+            Some(("1".to_owned(), "2".to_owned())),
+        ];
+        let selection = filesystem_selection(
+            directory.path(),
+            &destination,
+            true,
+            vec![SelectedSource::new(
+                source_folder,
+                vec![first_file.clone(), second_file.clone()],
+            )],
+        );
+
+        let outcome = organize_selection(&mut ui, &selection, &client).unwrap();
+
+        assert_eq!(outcome, RunOutcome::Completed);
+        assert!(!first_file.exists());
+        assert!(!second_file.exists());
+        assert_eq!(
+            fs::read_to_string(destination.join("1399 - S01E01 - Game - Of Thrones.mkv")).unwrap(),
+            "episode one"
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join("1399 - S01E02 - Game - Of Thrones.mp4")).unwrap(),
+            "episode two"
+        );
+        assert!(ui.events.iter().any(|event| event == "preview:2"));
+        assert!(ui.events.iter().any(|event| event == "report:2:0:0"));
+        assert!(ui.events.iter().any(|event| event == "verified:S01E01"));
+        assert!(ui.events.iter().any(|event| event == "verified:S01E02"));
+    }
+
+    #[test]
+    fn each_selected_video_runs_its_own_movie_identification_loop() {
+        let directory = tempdir().unwrap();
+        let source_folder = directory.path().join("movies");
+        let destination = directory.path().join("organized");
+        let first_file = source_folder.join("first.mkv");
+        let second_file = source_folder.join("second.mkv");
+        fs::create_dir(&source_folder).unwrap();
+        fs::write(&first_file, "first").unwrap();
+        fs::write(&second_file, "second").unwrap();
+
+        let client = FakeTmdbProvider {
+            items: vec![
+                movie_item(550, "Fight Club"),
+                movie_item(680, "Pulp Fiction"),
+            ],
+            ..FakeTmdbProvider::default()
+        };
+        let mut ui = RecordingUi {
+            identification_methods: vec![
+                Some(IdentificationMethod::ManualId),
+                Some(IdentificationMethod::ManualId),
+            ],
+            media_types: vec![Some(MediaType::Movie), Some(MediaType::Movie)],
+            tmdb_ids: vec![Some("550".to_owned()), Some("680".to_owned())],
+            tmdb_confirmations: vec![Some(true), Some(true)],
+            confirm_responses: vec![Some(true)],
+            ..RecordingUi::default()
+        };
+        let selection = filesystem_selection(
+            directory.path(),
+            &destination,
+            false,
+            vec![SelectedSource::new(
+                source_folder,
+                vec![first_file.clone(), second_file.clone()],
+            )],
+        );
+
+        let outcome = organize_selection(&mut ui, &selection, &client).unwrap();
+
+        assert_eq!(outcome, RunOutcome::Completed);
+        assert!(!first_file.exists());
+        assert!(!second_file.exists());
+        assert_eq!(
+            fs::read_to_string(destination.join("550 - Fight Club.mkv")).unwrap(),
+            "first"
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join("680 - Pulp Fiction.mkv")).unwrap(),
+            "second"
+        );
+        assert!(ui.events.iter().any(|event| event == "preview:2"));
+        assert!(ui.events.iter().any(|event| event == "report:2:0:0"));
+    }
+
+    #[test]
+    fn duplicate_series_episode_values_are_rejected_and_can_be_corrected() {
+        let directory = tempdir().unwrap();
+        let source_folder = directory.path().join("series");
+        let destination = directory.path().join("organized");
+        let first_file = source_folder.join("first.mkv");
+        let second_file = source_folder.join("second.mkv");
+        fs::create_dir(&source_folder).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(&first_file, "first").unwrap();
+        fs::write(&second_file, "second").unwrap();
+
+        let id = TmdbId::new(1399).unwrap();
+        let client = FakeTmdbProvider {
+            items: vec![series_item(1399, "Game of Thrones")],
+            episodes: [(id, EpisodeRef::new(1, 1)), (id, EpisodeRef::new(1, 2))]
+                .into_iter()
+                .collect(),
+        };
+        let mut ui = manual_identification_ui(MediaType::Series, 1399, Some(true));
+        ui.identification_methods = vec![
+            Some(IdentificationMethod::ManualId),
+            Some(IdentificationMethod::ManualId),
+        ];
+        ui.media_types = vec![Some(MediaType::Series), Some(MediaType::Series)];
+        ui.tmdb_ids = vec![Some("1399".to_owned()), Some("1399".to_owned())];
+        ui.tmdb_confirmations = vec![Some(true), Some(true)];
+        ui.episode_numbers = vec![
+            Some(("1".to_owned(), "1".to_owned())),
+            Some(("1".to_owned(), "1".to_owned())),
+            Some(("1".to_owned(), "2".to_owned())),
+        ];
+        let selection = filesystem_selection(
+            directory.path(),
+            &destination,
+            true,
+            vec![SelectedSource::new(
+                source_folder,
+                vec![first_file.clone(), second_file.clone()],
+            )],
+        );
+
+        let outcome = organize_selection(&mut ui, &selection, &client).unwrap();
+
+        assert_eq!(outcome, RunOutcome::Completed);
+        assert!(
+            ui.events
+                .iter()
+                .any(|event| event.contains("was already assigned"))
+        );
+        assert_eq!(
+            ui.events
+                .iter()
+                .filter(|event| event.as_str() == "verified:S01E01")
+                .count(),
+            2
+        );
+        assert!(ui.events.iter().any(|event| event == "verified:S01E02"));
+    }
+
+    #[test]
+    fn declining_the_final_confirmation_does_not_create_or_change_anything() {
+        let directory = tempdir().unwrap();
+        let source_folder = directory.path().join("movies");
+        let destination = directory.path().join("new-organized");
+        let source_file = source_folder.join("movie.mkv");
+        fs::create_dir(&source_folder).unwrap();
+        fs::write(&source_file, "movie").unwrap();
+
+        let client = FakeTmdbProvider {
+            items: vec![movie_item(550, "Fight Club")],
+            ..FakeTmdbProvider::default()
+        };
+        let mut ui = manual_identification_ui(MediaType::Movie, 550, Some(false));
+        let selection = filesystem_selection(
+            directory.path(),
+            &destination,
+            false,
+            vec![SelectedSource::new(
+                source_folder,
+                vec![source_file.clone()],
+            )],
+        );
+
+        let outcome = organize_selection(&mut ui, &selection, &client).unwrap();
+
+        assert_eq!(outcome, RunOutcome::Cancelled);
+        assert!(source_file.exists());
+        assert!(!destination.exists());
+        assert!(!ui.events.iter().any(|event| event.starts_with("report:")));
+    }
+
+    #[test]
+    fn an_existing_destination_conflict_blocks_confirmation_and_preserves_the_source() {
+        let directory = tempdir().unwrap();
+        let source_folder = directory.path().join("movies");
+        let destination = directory.path().join("organized");
+        let source_file = source_folder.join("movie.mkv");
+        let conflicting_file = destination.join("550 - Fight Club.mkv");
+        fs::create_dir(&source_folder).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(&source_file, "source").unwrap();
+        fs::write(&conflicting_file, "existing").unwrap();
+
+        let client = FakeTmdbProvider {
+            items: vec![movie_item(550, "Fight Club")],
+            ..FakeTmdbProvider::default()
+        };
+        let mut ui = manual_identification_ui(MediaType::Movie, 550, Some(true));
+        let selection = filesystem_selection(
+            directory.path(),
+            &destination,
+            true,
+            vec![SelectedSource::new(
+                source_folder,
+                vec![source_file.clone()],
+            )],
+        );
+
+        let error = organize_selection(&mut ui, &selection, &client).unwrap_err();
+
+        assert!(matches!(
+            error,
+            AppError::Filesystem(crate::error::FilesystemError::DestinationAlreadyExists { .. })
+        ));
+        assert!(source_file.exists());
+        assert_eq!(fs::read_to_string(conflicting_file).unwrap(), "existing");
+        assert!(!ui.events.iter().any(|event| event.starts_with("preview:")));
+        assert!(
+            !ui.events
+                .iter()
+                .any(|event| event.starts_with("confirm:Move"))
+        );
     }
 
     #[test]

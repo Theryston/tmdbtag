@@ -4,7 +4,9 @@
 
 This file defines the engineering rules for agents and contributors working on the title-tmdb-file repository.
 
-The project is a small Rust CLI that interactively selects video files, identifies a movie or TV series through The Movie Database (TMDB), and moves the files to a destination with deterministic, metadata-bearing names.
+The project is a small Rust CLI that interactively selects video files, identifies each selected
+video as a movie or TV series through The Movie Database (TMDB), and moves the files to a
+destination with deterministic, metadata-bearing names.
 
 This file is an implementation guide. The product behavior is defined by README.md. Agents must read both files before making a code change.
 
@@ -65,13 +67,12 @@ title-tmdb-file/
         └── models.rs
 ~~~
 
-The planning and movement portions of the media-organization workflow are still placeholders. Do not describe those capabilities as already available. The pure naming and metadata-recovery boundary is implemented as the completed Task 04 capability; filesystem discovery and explicit media selection are implemented as the completed Task 03 boundary.
-
-The CLI foundation is now implemented: command parsing, interactive terminal contracts, per-user
-configuration persistence, the shared configuration wizard, local configuration validation, the
-reusable TMDB client, the TMDB identification boundary, the non-mutating filesystem discovery and
-media-selection boundary, and the pure naming/metadata-recovery boundary are available. Planning
-and movement are still unimplemented until Task 05 is completed.
+The complete documented interactive MVP workflow is implemented: command parsing, interactive
+terminal contracts, per-user configuration persistence, TMDB identification, non-mutating
+filesystem discovery and media selection, deterministic naming, typed plan construction, complete
+preview, pre-commit validation, safe movement, and per-file execution reporting are available.
+Future retrieval commands, non-interactive modes, and auxiliary-file support remain intentionally
+out of scope.
 
 The repository is a binary application, not a library product at this stage. Nevertheless, the core logic must be structured so it can be tested without driving a real terminal or contacting the real TMDB service.
 
@@ -138,13 +139,16 @@ Rules:
 
 ### Unit of work
 
-Each source folder represents exactly one TMDB item.
+Each selected video file is an independent TMDB identification and planning unit. A source folder
+is retained as selection and display context, but it does not determine the metadata for every file
+inside it.
 
-- A movie folder must have exactly one selected video file.
-- A series folder may have one or more selected video files.
-- For a series, each selected file receives its own season and episode numbers.
-- Multiple selected series files represent episodes of the same series.
-- Different movies or series in one source folder are outside the MVP and must not be guessed or merged.
+- Run the complete identification loop for every selected video file.
+- A movie file creates one operation without an episode reference.
+- A series file creates one operation after its season and episode are validated through TMDB.
+- Multiple files in one source folder may represent different movies, different series, or multiple
+  episodes of the same series.
+- Do not reuse a previous file's TMDB item automatically, even when adjacent files look related.
 
 ### TMDB identification
 
@@ -614,9 +618,11 @@ VideoFile
 DestinationSelection
 SelectedSource
 FilesystemSelection
-SelectedMedia
-MovePlanItem
-MovePlan
+FileSnapshot
+PlannedOperation
+OperationPlan
+OperationStatus
+OperationResult
 ExecutionReport
 ~~~
 
@@ -790,9 +796,10 @@ The following invariants must be enforced by code, not left as comments.
   allowlist.
 - Every selected source file belongs to one selected source folder.
 - No source file appears more than once in a plan.
-- A movie plan contains exactly one file.
-- A series plan contains at least one file.
-- Series episode keys are unique within one execution.
+- Every selected source file has exactly one confirmed TMDB item.
+- A movie operation has no episode reference.
+- A series operation has one validated episode reference.
+- Series episode keys are unique within one execution for the same TMDB series.
 
 ### Destination selection
 
@@ -964,8 +971,8 @@ For a normal interactive invocation, the exact high-level order is:
 8. the UI asks for the destination;
 9. the UI lists and selects source folders;
 10. the UI recursively lists and selects recognized video files for each folder;
-11. the UI identifies one movie or series per source folder;
-12. the UI collects season and episode per series file;
+11. the UI runs the identification loop for every selected video file;
+12. the UI collects season and episode for each file identified as a series;
 13. the application builds and validates the complete plan;
 14. the UI displays the complete preview;
 15. the UI asks for explicit confirmation;
@@ -1178,6 +1185,12 @@ Requirements:
 
 Do not assume std::fs::rename has no-replace semantics on every operating system.
 
+The current implementation publishes a regular-file destination with `std::fs::hard_link`, which
+fails atomically when the final path already exists, and removes the source only after the
+publication and source revalidation succeed. Automatic execution treats an operating-system
+cross-device error as the signal to use the cross-volume copy path. If hard-link publication is
+unsupported, the operation fails safely; do not replace it with a plain overwriting rename.
+
 ### Cross-volume moves
 
 Cross-volume movement is a copy followed by source removal.
@@ -1371,6 +1384,9 @@ Use temporary directories for:
 - cancellation with no changes;
 - source preservation after failures;
 - report contents after partial execution.
+
+The current Task 05 suite also forces the cross-volume executor through its test seam so it can
+prove temporary-copy verification and cleanup without requiring a particular mounted volume.
 
 Do not use the repository itself as a test fixture. Do not create test files in the user's working directory.
 

@@ -5,8 +5,8 @@ use std::{
 
 use crate::{
     domain::{
-        DestinationSelection, EpisodeRef, IdentificationMethod, MediaType, SourceFolder,
-        SourceRoot, TmdbItem, TmdbSearchCandidate, VideoFile,
+        DestinationSelection, EpisodeRef, ExecutionReport, IdentificationMethod, MediaType,
+        OperationPlan, SourceFolder, SourceRoot, TmdbItem, TmdbSearchCandidate, VideoFile,
     },
     error::UiResult,
 };
@@ -83,6 +83,30 @@ pub trait InteractiveUi {
 
     /// Starts a spinner/progress activity for a potentially slow operation.
     fn start_activity(&mut self, message: &str) -> UiResult<Box<dyn ProgressOutput>>;
+
+    /// Displays the complete immutable plan before the final mutation confirmation.
+    fn show_plan_preview(&mut self, plan: &OperationPlan) -> UiResult<()> {
+        self.show_message(
+            MessageLevel::Info,
+            &format!(
+                "Prepared an operation plan for {} file(s).",
+                plan.operation_count()
+            ),
+        )
+    }
+
+    /// Displays one final result for every operation after execution.
+    fn show_execution_report(&mut self, report: &ExecutionReport) -> UiResult<()> {
+        self.show_message(
+            MessageLevel::Info,
+            &format!(
+                "Completed: {} · Failed: {} · Pending: {}",
+                report.completed_count(),
+                report.failed_count(),
+                report.pending_count()
+            ),
+        )
+    }
 
     /// Collects the destination path before source-folder discovery begins.
     fn ask_destination_path(&mut self) -> UiResult<Option<String>> {

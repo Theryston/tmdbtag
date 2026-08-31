@@ -7,7 +7,8 @@ use indicatif::{ProgressBar, ProgressStyle};
 use crate::{
     app,
     domain::{
-        EpisodeRef, IdentificationMethod, MediaType, RunOutcome, TmdbItem, TmdbSearchCandidate,
+        EpisodeRef, IdentificationMethod, MediaType, OperationStatus, RunOutcome, TmdbItem,
+        TmdbSearchCandidate,
     },
     error::{AppError, AppResult, UiError, UiResult},
     ui::{InteractiveUi, MessageLevel, ProgressOutput, TmdbInteraction},
@@ -278,6 +279,89 @@ impl InteractiveUi for TerminalUi {
         progress.set_message(message.to_owned());
 
         Ok(Box::new(IndicatifProgress { progress }))
+    }
+
+    fn show_plan_preview(&mut self, plan: &crate::domain::OperationPlan) -> UiResult<()> {
+        let source_root = plan.source_root().path();
+        let destination_status = if plan.destination().exists() {
+            "existing directory"
+        } else {
+            "will be created after final confirmation"
+        };
+
+        self.write_line("")?;
+        self.write_line(&format!(
+            "{}",
+            dialoguer::console::style("Operation preview").cyan().bold()
+        ))?;
+        self.write_line(&format!(
+            "Destination: {} ({destination_status})",
+            crate::ui::display_relative_path(plan.destination().path(), source_root)
+        ))?;
+        self.write_line(&format!("Total files: {}", plan.operation_count()))?;
+        self.write_line("")?;
+
+        for operation in plan.operations() {
+            let source = crate::ui::display_relative_path(operation.source_path(), source_root);
+            let destination =
+                crate::ui::display_relative_path(operation.destination_path(), source_root);
+            let item = operation.tmdb_item();
+            let episode = operation
+                .episode()
+                .map(|episode| format!(" · S{:02}E{:02}", episode.season(), episode.episode()))
+                .unwrap_or_default();
+
+            self.write_line(&format!("  {source} -> {destination}"))?;
+            self.write_line(&format!(
+                "    TMDB: {} [{}] {}{episode}",
+                item.id,
+                item.media_type,
+                terminal_text(&item.title)
+            ))?;
+            self.write_line(&format!(
+                "    Filename: {}",
+                terminal_text(operation.normalized_filename())
+            ))?;
+        }
+
+        self.write_line("")
+    }
+
+    fn show_execution_report(&mut self, report: &crate::domain::ExecutionReport) -> UiResult<()> {
+        let source_root = report.source_root().path();
+        self.write_line("")?;
+        self.write_line(&format!(
+            "{}",
+            dialoguer::console::style("Execution report").cyan().bold()
+        ))?;
+        self.write_line(&format!(
+            "Completed: {} · Failed: {} · Pending: {}",
+            report.completed_count(),
+            report.failed_count(),
+            report.pending_count()
+        ))?;
+
+        for result in report.results() {
+            let source = crate::ui::display_relative_path(result.source_path(), source_root);
+            let destination =
+                crate::ui::display_relative_path(result.destination_path(), source_root);
+            match result.status() {
+                OperationStatus::Completed => {
+                    self.write_line(&format!("  ✔ Completed: {source} -> {destination}"))?;
+                }
+                OperationStatus::Failed { reason } => {
+                    self.write_line(&format!(
+                        "  ✘ Failed: {source} -> {destination} ({})",
+                        terminal_text(reason)
+                    ))?;
+                }
+                OperationStatus::Pending => {
+                    self.write_line(&format!("  · Pending: {source} -> {destination}"))?;
+                }
+            }
+        }
+
+        self.write_line("")
     }
 }
 

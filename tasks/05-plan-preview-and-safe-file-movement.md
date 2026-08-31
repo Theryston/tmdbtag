@@ -1,6 +1,6 @@
 # Task 05 — Plan, Preview, and Safe File Movement
 
-**Status:** Not started
+**Status:** Completed
 **Priority:** P0
 **Dependencies:** Tasks 01, 02, 03, and 04
 **Blocks:** None
@@ -13,13 +13,11 @@ The central rule is: build and validate the complete operation plan first, displ
 
 ## Required outcome
 
-For every selected source folder:
+For every selected video file:
 
-- associate one confirmed TMDB movie or series;
-- enforce the one-TMDB-item-per-source-folder rule;
-- require exactly one selected file for a movie;
-- allow one or more selected files for a series;
-- collect and validate season/episode values for every series file;
+- run one complete identification loop and associate one confirmed TMDB movie or series;
+- allow multiple independent TMDB items to come from the same source folder;
+- collect and validate season/episode values when that file is identified as a series;
 - generate normalized destination names;
 - detect all conflicts before confirmation;
 - display complete source and destination paths as relative UI paths;
@@ -55,10 +53,10 @@ The exact Rust types may differ, but a plan must be immutable from preview throu
 
 The planner must:
 
-- associate every file with the selected source folder;
-- ensure all files in one source folder use the same confirmed TMDB item;
-- reject a movie folder with zero or more than one selected file;
-- collect series season and episode values per file;
+- associate every file with the selected source folder for context;
+- identify and confirm the TMDB item independently for every selected file;
+- create one movie operation for every file identified as a movie;
+- collect series season and episode values per file identified as a series;
 - reject duplicate series + season + episode combinations in one run;
 - use only metadata confirmed by TMDB;
 - call the naming module for every final filename;
@@ -182,7 +180,6 @@ Do not implement in this task:
 - folder renaming or folder creation beyond the confirmed destination;
 - subtitles, images, `.nfo`, or auxiliary-file movement;
 - recursive source-folder selection beyond direct children of the current directory;
-- multiple TMDB items in one source folder;
 - a persistent operation database;
 - unattended or confirmation-free execution;
 - re-encoding or modifying video contents;
@@ -193,7 +190,7 @@ Do not implement in this task:
 Cover the full lifecycle with temporary directories and fake TMDB/UI boundaries:
 
 - one movie folder with one file;
-- a movie folder with zero or multiple selected files;
+- one source folder with multiple selected movie files, each using its own identification loop;
 - one series folder with multiple episodes;
 - duplicate series episode values;
 - multiple source folders in one run;
@@ -219,19 +216,19 @@ Do not require a real TMDB API, a real media library, or a particular filesystem
 
 ## Acceptance checklist
 
-- [ ] The planner enforces one confirmed TMDB item per source folder.
-- [ ] Movies require exactly one selected recognized video file.
-- [ ] Series files receive individually validated season and episode values.
-- [ ] The full plan is calculated before any filesystem mutation.
-- [ ] All relative paths, metadata, names, conflicts, and warnings appear in the preview.
-- [ ] Any pre-validation failure blocks confirmation and causes zero mutations.
-- [ ] Confirmation is explicit and defaults to no.
-- [ ] Declining confirmation creates no destination and changes no files.
-- [ ] Existing destinations are never overwritten or silently renamed around.
-- [ ] Same-volume movement uses a safe no-replace operation.
-- [ ] Cross-volume movement verifies the temporary copy before removing the source.
-- [ ] Unexpected execution failures stop new work by default and report completed, failed, and pending files.
-- [ ] Per-file final results and totals are rendered in English.
-- [ ] The implementation preserves the video contents.
-- [ ] Automated tests cover planning, cancellation, conflicts, same-volume moves, cross-volume safety, and partial failure.
-- [ ] Full formatting, build, test, lint, and diff checks pass.
+- [x] The planner runs one confirmed TMDB identification loop for every selected video file.
+- [x] Multiple independent movie or series items can be selected from the same source folder.
+- [x] Series files receive individually identified and validated season and episode values.
+- [x] The full plan is calculated before any filesystem mutation.
+- [x] All relative paths, metadata, names, conflicts, and warnings appear in the preview or actionable validation output.
+- [x] Any pre-validation failure blocks confirmation and causes zero mutations.
+- [x] Confirmation is explicit and defaults to no.
+- [x] Declining confirmation creates no destination and changes no files.
+- [x] Existing destinations are never overwritten or silently renamed around.
+- [x] Same-volume movement uses a safe no-replace operation.
+- [x] Cross-volume movement verifies the temporary copy before removing the source.
+- [x] Unexpected execution failures stop new work by default and report completed, failed, and pending files.
+- [x] Per-file final results and totals are rendered in English.
+- [x] The implementation preserves the video contents.
+- [x] Automated tests cover planning, cancellation, conflicts, same-volume moves, cross-volume safety, and partial failure.
+- [x] Full formatting, build, test, lint, and diff checks pass.

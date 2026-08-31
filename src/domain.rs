@@ -1,4 +1,4 @@
-use std::{fmt, path::PathBuf, str::FromStr};
+use std::{fmt, path::PathBuf, str::FromStr, time::SystemTime};
 
 use thiserror::Error;
 
@@ -292,6 +292,275 @@ impl FilesystemSelection {
     }
 }
 
+/// The source-file state captured while a plan is built.
+///
+/// The executor compares this snapshot again immediately before each operation. Size and
+/// modification time are intentionally used as a portable, bounded identity check; a future
+/// implementation may add a content digest without changing the plan shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileSnapshot {
+    size_bytes: u64,
+    modified: Option<SystemTime>,
+}
+
+impl FileSnapshot {
+    /// Creates a source snapshot from portable filesystem observations.
+    pub fn new(size_bytes: u64, modified: Option<SystemTime>) -> Self {
+        Self {
+            size_bytes,
+            modified,
+        }
+    }
+
+    /// Returns the observed file size.
+    pub const fn size_bytes(&self) -> u64 {
+        self.size_bytes
+    }
+
+    /// Returns the observed modification time when the filesystem provided one.
+    pub fn modified(&self) -> Option<SystemTime> {
+        self.modified
+    }
+}
+
+/// One immutable source-to-destination operation in an approved organization plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedOperation {
+    source_folder: PathBuf,
+    source_path: PathBuf,
+    destination_path: PathBuf,
+    normalized_filename: String,
+    tmdb_item: TmdbItem,
+    episode: Option<EpisodeRef>,
+    source_extension: VideoExtension,
+    source_snapshot: FileSnapshot,
+}
+
+impl PlannedOperation {
+    /// Creates an operation from already verified metadata and a source snapshot.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        source_folder: PathBuf,
+        source_path: PathBuf,
+        destination_path: PathBuf,
+        normalized_filename: String,
+        tmdb_item: TmdbItem,
+        episode: Option<EpisodeRef>,
+        source_extension: VideoExtension,
+        source_snapshot: FileSnapshot,
+    ) -> Self {
+        Self {
+            source_folder,
+            source_path,
+            destination_path,
+            normalized_filename,
+            tmdb_item,
+            episode,
+            source_extension,
+            source_snapshot,
+        }
+    }
+
+    /// Returns the selected source folder associated with this operation.
+    pub fn source_folder(&self) -> &std::path::Path {
+        &self.source_folder
+    }
+
+    /// Returns the exact source file path.
+    pub fn source_path(&self) -> &std::path::Path {
+        &self.source_path
+    }
+
+    /// Returns the exact destination file path.
+    pub fn destination_path(&self) -> &std::path::Path {
+        &self.destination_path
+    }
+
+    /// Returns the generated filename component retained by the immutable plan.
+    pub fn normalized_filename(&self) -> &str {
+        &self.normalized_filename
+    }
+
+    /// Returns the verified TMDB item used by this operation.
+    pub fn tmdb_item(&self) -> &TmdbItem {
+        &self.tmdb_item
+    }
+
+    /// Returns the verified series episode, or `None` for a movie.
+    pub const fn episode(&self) -> Option<EpisodeRef> {
+        self.episode
+    }
+
+    /// Returns the canonical source-video extension.
+    pub fn source_extension(&self) -> &VideoExtension {
+        &self.source_extension
+    }
+
+    /// Returns the source state captured while planning.
+    pub fn source_snapshot(&self) -> &FileSnapshot {
+        &self.source_snapshot
+    }
+}
+
+/// The complete immutable plan shown to the user before any mutation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperationPlan {
+    source_root: SourceRoot,
+    destination: DestinationSelection,
+    operations: Vec<PlannedOperation>,
+}
+
+impl OperationPlan {
+    /// Creates a plan. The filesystem layer validates that it has at least one safe operation.
+    pub fn new(
+        source_root: SourceRoot,
+        destination: DestinationSelection,
+        operations: Vec<PlannedOperation>,
+    ) -> Self {
+        Self {
+            source_root,
+            destination,
+            operations,
+        }
+    }
+
+    /// Returns the source root used for relative display paths.
+    pub fn source_root(&self) -> &SourceRoot {
+        &self.source_root
+    }
+
+    /// Returns the selected destination and its deferred-creation state.
+    pub fn destination(&self) -> &DestinationSelection {
+        &self.destination
+    }
+
+    /// Returns operations in the stable order shown by the preview.
+    pub fn operations(&self) -> &[PlannedOperation] {
+        &self.operations
+    }
+
+    /// Returns the number of files in the plan.
+    pub fn operation_count(&self) -> usize {
+        self.operations.len()
+    }
+}
+
+/// The final state of one attempted operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OperationStatus {
+    /// The destination was published and the source was removed.
+    Completed,
+    /// The operation failed and no later operation was started.
+    Failed { reason: String },
+    /// The operation was not started because an earlier operation failed.
+    Pending,
+}
+
+impl OperationStatus {
+    /// Returns whether this result represents a successful complete move.
+    pub const fn is_completed(&self) -> bool {
+        matches!(self, Self::Completed)
+    }
+
+    /// Returns whether this result represents a failure.
+    pub const fn is_failed(&self) -> bool {
+        matches!(self, Self::Failed { .. })
+    }
+}
+
+/// The report for every operation attempted after confirmation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperationResult {
+    source_path: PathBuf,
+    destination_path: PathBuf,
+    status: OperationStatus,
+}
+
+impl OperationResult {
+    /// Creates a per-file result.
+    pub fn new(source_path: PathBuf, destination_path: PathBuf, status: OperationStatus) -> Self {
+        Self {
+            source_path,
+            destination_path,
+            status,
+        }
+    }
+
+    /// Returns the exact source path associated with the result.
+    pub fn source_path(&self) -> &std::path::Path {
+        &self.source_path
+    }
+
+    /// Returns the exact destination path associated with the result.
+    pub fn destination_path(&self) -> &std::path::Path {
+        &self.destination_path
+    }
+
+    /// Returns the result status.
+    pub fn status(&self) -> &OperationStatus {
+        &self.status
+    }
+}
+
+/// The deterministic per-file report produced after confirmation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionReport {
+    source_root: SourceRoot,
+    results: Vec<OperationResult>,
+}
+
+impl ExecutionReport {
+    /// Creates a report from results in plan order.
+    pub fn new(source_root: SourceRoot, results: Vec<OperationResult>) -> Self {
+        Self {
+            source_root,
+            results,
+        }
+    }
+
+    /// Returns the source root used for relative report paths.
+    pub fn source_root(&self) -> &SourceRoot {
+        &self.source_root
+    }
+
+    /// Returns per-file results in the original plan order.
+    pub fn results(&self) -> &[OperationResult] {
+        &self.results
+    }
+
+    /// Returns the number of completed operations.
+    pub fn completed_count(&self) -> usize {
+        self.results
+            .iter()
+            .filter(|result| result.status.is_completed())
+            .count()
+    }
+
+    /// Returns the number of failed operations.
+    pub fn failed_count(&self) -> usize {
+        self.results
+            .iter()
+            .filter(|result| result.status.is_failed())
+            .count()
+    }
+
+    /// Returns the number of operations that were not started.
+    pub fn pending_count(&self) -> usize {
+        self.results
+            .iter()
+            .filter(|result| matches!(result.status, OperationStatus::Pending))
+            .count()
+    }
+
+    /// Returns whether execution completed without failures or pending operations.
+    pub fn is_success(&self) -> bool {
+        !self.results.is_empty()
+            && self.failed_count() == 0
+            && self.pending_count() == 0
+            && self.completed_count() == self.results.len()
+    }
+}
+
 fn parse_non_negative_number(value: &str, field: &'static str) -> Result<u32, DomainError> {
     let value = value.trim();
     if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
@@ -407,12 +676,23 @@ pub enum RunOutcome {
     MediaSelectionReady,
     /// The saved TMDB configuration was intentionally updated by the `config` command.
     ConfigurationUpdated,
+    /// The confirmed plan completed all file operations successfully.
+    Completed,
+    /// Execution stopped after one or more operations failed.
+    PartiallyCompleted,
 }
 
 impl RunOutcome {
-    /// Returns the process exit code for this non-mutating outcome.
+    /// Returns the process exit code for this outcome.
     pub const fn exit_code(self) -> i32 {
-        0
+        match self {
+            Self::PartiallyCompleted => 1,
+            Self::Cancelled
+            | Self::StartupConfigured
+            | Self::MediaSelectionReady
+            | Self::ConfigurationUpdated
+            | Self::Completed => 0,
+        }
     }
 }
 

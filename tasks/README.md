@@ -12,7 +12,7 @@ The product contract is defined by the root [README.md](../README.md). Engineeri
 | [02 — TMDB configuration and identification](02-tmdb-configuration-and-identification.md) | Per-user API-key configuration, metadata language, searches, manual IDs, details, and episode validation | 01 | 05 | Completed |
 | [03 — Filesystem discovery and media selection](03-filesystem-discovery-and-media-selection.md) | Current-directory discovery, destination selection, direct source-folder selection, recursive multi-format video selection, and relative path presentation | 01 | 05 | Completed |
 | [04 — Naming normalization and metadata recovery](04-naming-normalization-and-metadata-recovery.md) | Deterministic multi-format movie/series filenames, invalid-character handling, and parsing generated names | 01 | 05 | Completed |
-| [05 — Plan, preview, and safe movement](05-plan-preview-and-safe-movement.md) | End-to-end planning, conflict detection, confirmation, same-volume moves, cross-volume safety, and reporting | 01, 02, 03, 04 | None | Not started |
+| [05 — Plan, preview, and safe movement](05-plan-preview-and-safe-file-movement.md) | End-to-end planning, conflict detection, confirmation, same-volume moves, cross-volume safety, and reporting | 01, 02, 03, 04 | None | Completed |
 
 ## Recommended sequence
 
@@ -28,7 +28,7 @@ Every task must:
 - keep application-owned code, prompts, help, diagnostics, tests, and documentation in English;
 - define typed boundaries between the UI, domain, TMDB, naming, and filesystem layers;
 - include automated tests for the behavior it owns;
-- preserve the one-TMDB-item-per-source-folder rule;
+- run one confirmed TMDB identification loop for every selected video file;
 - avoid implementing features listed as initially out of scope;
 - avoid logging credentials, authorization headers, or sensitive request data;
 - keep file mutation behind a validated and confirmed operation plan;

@@ -21,7 +21,9 @@ The task is implemented across the following boundaries:
 - `src/ui.rs` extends the renderer-neutral interaction boundary with destination, source-folder, and video-file selection operations. The terminal adapter displays source and destination paths relatively while retaining exact paths in typed values, and continues to own dialoguer rendering and English wording.
 - `src/app.rs` connects the validated TMDB startup stage to the destination and selection wizard, handles empty/retry/cancel paths, preserves folder associations, and never mutates the filesystem during selection.
 
-The normal command now returns a `MediaSelectionReady` outcome after this task's non-mutating stage. TMDB item identification, filename generation, planning, confirmation, and movement remain later workflow steps.
+The selection boundary is consumed by the complete organization workflow: after this task returns,
+the application runs a separate TMDB identification loop for every selected video before it builds
+the plan, previews it, and performs any confirmed movement.
 
 ## Required outcome
 
@@ -110,7 +112,9 @@ Rules:
 - require at least one selected file for a selected folder;
 - if no eligible file exists, explain why and offer cancel/back behavior.
 
-The selection result must include the source folder association. This association is necessary to enforce the one-TMDB-item-per-source-folder rule later.
+The selection result must include the source folder association. This association provides folder
+context for the later per-video TMDB identification and plan preview; it does not force all files
+inside one folder to share metadata.
 
 ### 5. Support correction and cancellation
 
