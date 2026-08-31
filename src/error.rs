@@ -193,6 +193,40 @@ impl TmdbError {
     }
 }
 
+/// Errors raised while composing or parsing metadata-bearing filenames.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum NamingError {
+    /// A filename was requested for the wrong TMDB namespace.
+    #[error("Cannot generate a {expected} filename for a {actual} TMDB item.")]
+    MediaTypeMismatch {
+        /// The namespace required by the filename operation.
+        expected: MediaType,
+        /// The namespace carried by the verified TMDB item.
+        actual: MediaType,
+    },
+    /// No usable title remained after normalization and fallback selection.
+    #[error("The TMDB title is empty after filename normalization.")]
+    EmptyTitle,
+    /// The selected or parsed extension is outside the supported video policy.
+    #[error("The video extension `{extension}` is not recognized.")]
+    UnsupportedVideoExtension {
+        /// A safe representation of the unsupported extension.
+        extension: String,
+    },
+    /// A movie title would be indistinguishable from the series filename prefix.
+    #[error("The movie title is ambiguous with the series filename pattern.")]
+    AmbiguousMovieTitle,
+    /// A parsed filename violates the generated filename contract.
+    #[error("The generated filename is invalid: {reason}.")]
+    InvalidGeneratedFilename {
+        /// A concise, static explanation safe for normal CLI output.
+        reason: &'static str,
+    },
+    /// The fixed identity prefix and extension leave no safe title capacity.
+    #[error("The generated filename exceeds the supported filename length limit.")]
+    FilenameTooLong,
+}
+
 /// Errors raised while resolving the working directory, destination, or selectable media.
 #[derive(Debug, Error)]
 pub enum FilesystemError {
@@ -353,6 +387,9 @@ pub enum AppError {
     /// TMDB rejected a request or returned an unusable response.
     #[error(transparent)]
     Tmdb(#[from] TmdbError),
+    /// Filename generation or parsing failed.
+    #[error(transparent)]
+    Naming(#[from] NamingError),
     /// Filesystem discovery or destination validation failed.
     #[error(transparent)]
     Filesystem(#[from] FilesystemError),
@@ -371,6 +408,7 @@ impl AppError {
             Self::Configuration(error) => error.exit_code(),
             Self::Domain(_) => 2,
             Self::Tmdb(error) => error.exit_code(),
+            Self::Naming(_) => 2,
             Self::Filesystem(error) => error.exit_code(),
             Self::NonInteractive => 2,
             Self::Ui(_) => 1,

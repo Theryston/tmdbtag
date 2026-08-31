@@ -27,6 +27,46 @@ impl fmt::Display for MediaType {
     }
 }
 
+/// Common video filename extensions supported by the discovery and naming layers.
+///
+/// The policy is intentionally extension-based. Portable filesystem metadata does not provide a
+/// reliable MIME type, so both discovery and filename parsing must use this same explicit list.
+pub const VIDEO_EXTENSIONS: &[&str] = &[
+    "3g2", "3gp", "3gp2", "3gpp", "amv", "asf", "avi", "bik", "braw", "dav", "divx", "drc", "dv",
+    "dvr-ms", "f4v", "flv", "flic", "h264", "h265", "hevc", "ivf", "m1v", "m2p", "m2t", "m2ts",
+    "m2v", "m4v", "mj2", "mjpeg", "mjpg", "mk3d", "mkv", "mod", "mov", "mp2", "mp2v", "mp4", "mpe",
+    "mpeg", "mpg", "mpv", "mts", "mxf", "nsv", "nut", "ogm", "ogv", "qt", "r3d", "rm", "rmvb",
+    "roq", "svi", "tod", "ts", "vdr", "vob", "webm", "wmv", "xvid", "y4m", "yuv",
+];
+
+/// A validated, lowercase video filename extension without its leading period.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct VideoExtension(String);
+
+impl VideoExtension {
+    /// Validates an extension against the shared video-extension policy.
+    pub fn parse(value: &str) -> Result<Self, DomainError> {
+        VIDEO_EXTENSIONS
+            .iter()
+            .find(|known| value.eq_ignore_ascii_case(known))
+            .map(|known| Self((*known).to_owned()))
+            .ok_or_else(|| DomainError::UnsupportedVideoExtension {
+                extension: sanitize_domain_text(value),
+            })
+    }
+
+    /// Returns the canonical lowercase extension without a leading period.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for VideoExtension {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// A positive numeric identifier from TMDB.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TmdbId(u64);
@@ -338,6 +378,22 @@ pub enum DomainError {
     /// A season or episode value was not a non-negative decimal integer.
     #[error("The {field} number must be a non-negative integer.")]
     InvalidNonNegativeNumber { field: &'static str },
+    /// A filename extension is outside the shared video-extension policy.
+    #[error("The video extension `{extension}` is not recognized.")]
+    UnsupportedVideoExtension { extension: String },
+}
+
+fn sanitize_domain_text(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                '�'
+            } else {
+                character
+            }
+        })
+        .collect()
 }
 
 /// The high-level result of one application invocation.
@@ -394,6 +450,22 @@ mod tests {
         assert_eq!(
             EpisodeRef::parse("1", "4294967296"),
             Err(DomainError::InvalidNonNegativeNumber { field: "episode" })
+        );
+    }
+
+    #[test]
+    fn video_extension_parser_canonicalizes_supported_case_variants() {
+        assert_eq!(VideoExtension::parse("MP4").unwrap().as_str(), "mp4");
+        assert_eq!(VideoExtension::parse("DVR-MS").unwrap().as_str(), "dvr-ms");
+    }
+
+    #[test]
+    fn video_extension_parser_rejects_unknown_extensions() {
+        assert_eq!(
+            VideoExtension::parse("txt"),
+            Err(DomainError::UnsupportedVideoExtension {
+                extension: "txt".to_owned(),
+            })
         );
     }
 }

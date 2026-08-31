@@ -65,13 +65,13 @@ title-tmdb-file/
         └── models.rs
 ~~~
 
-The naming, planning, and movement portions of the media-organization workflow are still placeholders. Do not describe those capabilities as already available. Filesystem discovery and explicit media selection are implemented as the completed Task 03 boundary.
+The planning and movement portions of the media-organization workflow are still placeholders. Do not describe those capabilities as already available. The pure naming and metadata-recovery boundary is implemented as the completed Task 04 capability; filesystem discovery and explicit media selection are implemented as the completed Task 03 boundary.
 
 The CLI foundation is now implemented: command parsing, interactive terminal contracts, per-user
 configuration persistence, the shared configuration wizard, local configuration validation, the
-reusable TMDB client, the TMDB identification boundary, and the non-mutating filesystem discovery
-and media-selection boundary are available. Naming, planning, and movement are still unimplemented
-until their respective tasks are completed.
+reusable TMDB client, the TMDB identification boundary, the non-mutating filesystem discovery and
+media-selection boundary, and the pure naming/metadata-recovery boundary are available. Planning
+and movement are still unimplemented until Task 05 is completed.
 
 The repository is a binary application, not a library product at this stage. Nevertheless, the core logic must be structured so it can be tested without driving a real terminal or contacting the real TMDB service.
 
@@ -1306,8 +1306,10 @@ The actual parser should:
 - validate the extension against the centralized recognized-video-extension policy;
 - preserve the recovered extension and normalize generated extensions to lowercase;
 - validate numeric ranges;
+- accept only canonical positive decimal TMDB IDs without leading zeroes;
 - distinguish movie and series forms;
 - reject empty titles;
+- reject incomplete or malformed SxxEyy markers instead of reclassifying them as movies;
 - reject path separators in the parsed title component;
 - return typed data rather than a map of strings;
 - preserve a title hint only as display data;

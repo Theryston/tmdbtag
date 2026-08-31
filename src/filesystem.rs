@@ -11,22 +11,12 @@ use std::{
 };
 
 use crate::{
-    domain::{DestinationSelection, SourceFolder, SourceRoot, VideoFile},
+    domain::{DestinationSelection, SourceFolder, SourceRoot, VideoExtension, VideoFile},
     error::FilesystemError,
 };
 
-/// Common filename extensions that identify video files for discovery.
-///
-/// Discovery remains extension-based because filesystem metadata does not expose a portable MIME
-/// type. The list intentionally covers common containers, broadcast formats, raw video formats,
-/// and codec-specific files while remaining centralized for future expansion.
-pub const VIDEO_EXTENSIONS: &[&str] = &[
-    "3g2", "3gp", "3gp2", "3gpp", "amv", "asf", "avi", "bik", "braw", "dav", "divx", "drc", "dv",
-    "dvr-ms", "f4v", "flv", "flic", "h264", "h265", "hevc", "ivf", "m1v", "m2p", "m2t", "m2ts",
-    "m2v", "m4v", "mj2", "mjpeg", "mjpg", "mk3d", "mkv", "mod", "mov", "mp2", "mp2v", "mp4", "mpe",
-    "mpeg", "mpg", "mpv", "mts", "mxf", "nsv", "nut", "ogm", "ogv", "qt", "r3d", "rm", "rmvb",
-    "roq", "svi", "tod", "ts", "vdr", "vob", "webm", "wmv", "xvid", "y4m", "yuv",
-];
+/// Backward-compatible access to the shared video-extension policy.
+pub use crate::domain::VIDEO_EXTENSIONS;
 
 /// The result of a deterministic directory scan and the non-fatal entries skipped during it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -359,11 +349,7 @@ fn discover_video_files_in_directory(
 pub fn has_video_extension(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            VIDEO_EXTENSIONS
-                .iter()
-                .any(|known| extension.eq_ignore_ascii_case(known))
-        })
+        .is_some_and(|extension| VideoExtension::parse(extension).is_ok())
 }
 
 fn validate_missing_destination_parent(path: &Path) -> Result<(), FilesystemError> {

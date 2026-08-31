@@ -1,6 +1,6 @@
 # Task 04 — Naming Normalization and Metadata Recovery
 
-**Status:** Not started
+**Status:** Completed — pure filename normalization, multi-format filename generation, generated-name parsing, and metadata round-trip tests are implemented.
 **Priority:** P0
 **Dependencies:** Task 01; uses the metadata model from Task 02 when integrated
 **Blocks:** Task 05
@@ -45,6 +45,7 @@ Use validated values rather than arbitrary strings where practical:
 - raw localized title;
 - original title as an optional fallback;
 - the selected source video's recognized extension.
+- a conservative 255-byte filename-component limit, with truncation applied only to the title.
 
 Keep the raw title separate from the normalized title. The raw value is needed for display, diagnostics, and future metadata operations. The normalized value is only for the destination filename.
 
@@ -100,6 +101,7 @@ Movie rules:
 - use the normalized localized title, falling back to the original title only when the configured-language title is unavailable;
 - preserve the selected source video's extension and emit it in lowercase in generated names;
 - omit year, codec, resolution, language, release group, and original filename.
+- reject a normalized movie title that would be indistinguishable from the `SxxEyy` series prefix.
 
 Series rules:
 
@@ -145,6 +147,8 @@ The parser must not perform a network request. A future metadata command can use
 - Never allow normalized title content to introduce a path separator.
 - Do not permit `.` or `..` as a title component.
 - Keep extension handling explicit and case-stable.
+- Keep the shared recognized-video-extension policy in one domain type and reuse it for generation,
+  parsing, and filesystem discovery.
 - Expose length or path-limit errors to the plan validator rather than silently dropping identity fields.
 
 ## Explicit non-goals
@@ -185,20 +189,21 @@ Because this layer is pure, prefer exhaustive unit tests and property-style test
 - generated-name round trips through the parser;
 - malformed movie and series names;
 - parser rejection of ambiguous or unsafe names;
+- filename-component length enforcement that truncates only the title and preserves identity fields;
 - guarantee that parsing does not access the network or filesystem.
 
 ## Acceptance checklist
 
-- [ ] All final filenames pass through one deterministic title-normalization function.
-- [ ] A colon is always normalized even on platforms that permit it.
-- [ ] Invalid characters cannot create path separators or unsafe components.
-- [ ] Accents and safe Unicode are preserved.
-- [ ] The raw TMDB title remains available separately from the normalized title.
-- [ ] Movie names match the documented pattern exactly.
-- [ ] Series names match the documented pattern exactly.
-- [ ] Season and episode values are padded to at least two digits without truncation.
-- [ ] The generated extension preserves the selected source extension in lowercase.
-- [ ] The title never contributes unverified source filename data.
-- [ ] Generated names can be parsed back into ID, type, and episode values.
-- [ ] Parsing treats the title as a hint and the ID/type as the recoverable identity.
-- [ ] Unit and round-trip tests cover normal, invalid, Unicode, and edge cases.
+- [x] All final filenames pass through one deterministic title-normalization function.
+- [x] A colon is always normalized even on platforms that permit it.
+- [x] Invalid characters cannot create path separators or unsafe components.
+- [x] Accents and safe Unicode are preserved.
+- [x] The raw TMDB title remains available separately from the normalized title.
+- [x] Movie names match the documented pattern exactly.
+- [x] Series names match the documented pattern exactly.
+- [x] Season and episode values are padded to at least two digits without truncation.
+- [x] The generated extension preserves the selected source extension in lowercase.
+- [x] The title never contributes unverified source filename data.
+- [x] Generated names can be parsed back into ID, type, episode, and extension values.
+- [x] Parsing treats the title as a hint and the ID/type as the recoverable identity.
+- [x] Unit and round-trip tests cover normal, invalid, Unicode, and edge cases.

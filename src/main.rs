@@ -4,6 +4,7 @@ pub mod config;
 pub mod domain;
 pub mod error;
 pub mod filesystem;
+pub mod naming;
 pub mod tmdb;
 pub mod ui;
 

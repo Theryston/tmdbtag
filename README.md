@@ -795,9 +795,13 @@ Canceling at any prompt before confirmation causes no changes. During a move tha
 
 There will be no local database in the MVP. The filename is the minimum index for locating the data again.
 
-### Planned parsing
+### Parsing contract
 
-The future parser must recognize:
+The pure parser in `src/naming.rs` already implements this contract for generated filenames. A
+future user-facing metadata command may use the parsed ID and media type to query TMDB again, but
+it must still treat the title as a display hint rather than authoritative metadata.
+
+The parser recognizes:
 
 ~~~text
 Movie:   ^(?<id>[0-9]+) - (?<title>.+)\.(?<extension>[A-Za-z0-9-]+)$
@@ -817,7 +821,8 @@ The parser must produce a reference equivalent to:
   media_type: tv,
   season: 1,
   episode: 1,
-  title_hint: "Game of Thrones"
+  title_hint: "Game of Thrones",
+  video_extension: "mp4"
 }
 ~~~
 
@@ -886,6 +891,7 @@ title-tmdb-file/
     ├── error.rs
     ├── ui.rs
     ├── filesystem.rs
+    ├── naming.rs
     └── tmdb/
         ├── mod.rs
         ├── client.rs
@@ -1037,8 +1043,8 @@ The MVP is complete only when all of the following criteria are met:
 - [x] Allow the user to enter an ID and type manually.
 - [x] Display the type and title before using the data.
 - [ ] Ask separately for season and episode for each series file.
-- [ ] Generate exactly the documented filename pattern.
-- [ ] Normalize titles for filenames, including replacing invalid characters such as colon, without losing the ID, season, or episode.
+- [x] Generate exactly the documented filename pattern.
+- [x] Normalize titles for filenames, including replacing invalid characters such as colon, without losing the ID, season, or episode.
 - [ ] Detect collisions before execution.
 - [ ] Never overwrite an existing destination.
 - [ ] Show a complete preview.
@@ -1046,7 +1052,7 @@ The MVP is complete only when all of the following criteria are met:
 - [ ] Move the file while keeping its contents intact.
 - [ ] Preserve the source when an unverified cross-volume copy fails.
 - [ ] Report success, failure, and pending items per file.
-- [ ] Allow the ID, type, and episode to be recovered from the generated filename.
+- [x] Allow the ID, type, and episode to be recovered from the generated filename.
 - [ ] Have automated tests for naming, parsing, validation, and safe movement.
 
 ## Testing Strategy
@@ -1139,8 +1145,8 @@ The detailed implementation breakdown is maintained in [Implementation Tasks](ta
 
 ### Phase 3 — Plan and movement
 
-- [ ] Implement domain models.
-- [ ] Implement sanitization and filename generation.
+- [x] Implement domain models.
+- [x] Implement sanitization and filename generation.
 - [ ] Implement preview and conflict detection.
 - [ ] Implement same-volume movement.
 - [ ] Implement safe cross-volume copying.
@@ -1148,7 +1154,7 @@ The detailed implementation breakdown is maintained in [Implementation Tasks](ta
 
 ### Phase 4 — Retrieval and extensions
 
-- [ ] Implement parsing of generated filenames.
+- [x] Implement parsing of generated filenames.
 - [ ] Add a separate command to query metadata from a filename.
 - [ ] Evaluate non-interactive mode and --dry-run.
 - [ ] Evaluate recursive source-folder selection, multiple titles per folder, subtitles, and auxiliary files.
