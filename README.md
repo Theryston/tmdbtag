@@ -151,43 +151,6 @@ Help, version, command-help, and invalid-command paths are handled by `clap`
 before the wizard. They do not require a TMDB key, a network connection, or a
 readable media directory.
 
-## Automated releases
-
-The repository includes a release pipeline designed for a binary-first
-distribution model:
-
-1. A push to `main` runs `release-plz update`.
-2. Matching Conventional Commit messages update the package version and
-   changelog.
-3. The workflow commits the release metadata and creates both `v<version>` and
-   `tmdbtag-v<version>` tags.
-4. Six release artifacts are built for Linux, macOS, and Windows on x86_64 and
-   ARM64.
-5. The workflow generates `checksums-sha256.txt`.
-6. A GitHub Release is created with all archives and the checksum file.
-
-The `tmdbtag-v<version>` namespace is reserved for release-plz's git-only
-version history. The public `v<version>` tag is the stable download/release tag
-used by the installer scripts.
-
-Release preparation responds to these commit prefixes:
-
-```text
-feat, fix, perf, refactor, docs
-```
-
-For example:
-
-```text
-feat: add support for a new video format
-fix: prevent destination collisions
-docs: clarify the installation flow
-```
-
-Other commit categories can still be useful for development, but they do not
-independently trigger the automatic version/changelog update configured for
-releases.
-
 ## The interactive experience
 
 ### Configuration first
@@ -499,54 +462,6 @@ not:
 
 These boundaries keep the first version predictable and make the naming contract
 a dependable foundation for future retrieval and automation features.
-
-## Project shape
-
-The codebase is organized around a small application layer and explicit
-boundaries:
-
-```text
-tmdbtag/
-├── Cargo.toml
-├── Cargo.lock
-├── README.md
-├── AGENTS.md
-├── release-plz.toml     # Git-only version and changelog policy
-├── unix.sh              # Linux/macOS latest-release installer
-├── win.ps1              # Windows latest-release installer
-├── .github/
-│   └── workflows/
-│       └── release.yml  # Cross-platform build and GitHub Release pipeline
-└── src/
-    ├── main.rs          # Thin process entry point and exit-code mapping
-    ├── app.rs           # Workflow orchestration
-    ├── cli.rs           # clap commands and concrete terminal interaction
-    ├── config.rs        # Per-user configuration loading, prompting, and persistence
-    ├── domain.rs        # Stable types and validated application concepts
-    ├── error.rs         # Actionable typed errors
-    ├── filesystem.rs    # Discovery, path validation, safe execution, and progress events
-    ├── naming.rs        # Pure filename generation, normalization, and parsing
-    ├── ui.rs            # Renderer-neutral interaction and progress contracts
-    └── tmdb/
-        ├── mod.rs
-        ├── client.rs    # HTTP transport and TMDB endpoint calls
-        └── models.rs    # API response mappings
-```
-
-The application is a binary, but the business rules are kept independent from a
-real terminal, real filesystem, real network, and real credentials wherever
-practical. This makes naming, parsing, planning, collision detection,
-configuration, and error behavior straightforward to test.
-
-The principal dependencies are deliberately focused:
-
-- `clap` for command parsing, help, version, and command diagnostics;
-- `dialoguer` and `crossterm` for polished keyboard interaction and live
-  selection;
-- `indicatif` for spinners and transfer progress;
-- `reqwest` with Rustls for bounded HTTPS communication;
-- `serde` and `serde_json` for the explicit configuration and API models;
-- `thiserror` for typed, actionable errors.
 
 ## Development
 
