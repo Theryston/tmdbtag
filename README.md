@@ -51,7 +51,10 @@ tmdbtag
   ├─ Load or collect your TMDB API key and metadata language
   ├─ Choose the source storage (local filesystem or S3)
   ├─ Choose the destination storage (local filesystem or S3)
-  ├─ Configure the saved S3 profile when it is needed
+  ├─ Load the saved S3 bucket catalog when it is needed
+  ├─ Require one bucket now if S3 has not been configured yet
+  ├─ Choose the source and destination bucket independently when needed
+  ├─ Choose an optional source or destination prefix for this run
   ├─ Choose Copy or Move
   ├─ Choose the destination folder or object prefix
   ├─ Select videos from the recursive file explorer
@@ -125,39 +128,51 @@ The guided session looks like this:
 3. It asks where the source files live: the local filesystem or S3-compatible
    object storage.
 4. It asks where the organized files should be written: locally or in S3.
-5. If either side is S3 and no complete profile is saved, it securely asks for
-   the S3 access key, secret key, bucket, base path, optional endpoint, and
-   region. Leaving the endpoint empty uses AWS's standard S3 endpoint.
-6. It asks whether the operation should be `Copy` or `Move`.
-7. It asks for a local destination folder or an S3 destination prefix.
-8. It scans the selected source recursively and opens one unified video
+5. If either side is S3 and no bucket is saved, it requires you to add one
+   before continuing. If multiple buckets are saved, it lets you select the
+   source bucket and destination bucket independently.
+6. If the source is S3, it asks for an optional source prefix. The empty value
+   means the selected bucket root.
+7. It asks whether the operation should be `Copy` or `Move`.
+8. It asks for a local destination folder or an optional S3 destination prefix.
+   The empty value means the destination bucket root.
+9. It scans the selected source recursively and opens one unified video
    explorer.
-9. You expand folders, select individual videos, and confirm the selected array.
-10. For each selected file, you search TMDB live or enter a TMDB ID manually.
-11. For series, you enter a season and episode, which are validated against
+10. You expand folders, select individual videos, and confirm the selected array.
+11. For each selected file, you search TMDB live or enter a TMDB ID manually.
+12. For series, you enter a season and episode, which are validated against
     TMDB.
-12. It builds and displays the complete plan, including every destination name.
-13. A final confirmation starts the operation. The default is always negative.
+13. It builds and displays the complete plan, including every destination name.
+14. A final confirmation starts the operation. The default is always negative.
 
 When local storage is selected, the directory where you launch the command is
 the source root; the executable's location is not used as the source root. When
-S3 is selected, the configured bucket and base path are the source root.
+S3 is selected, the selected bucket and optional source prefix are the source
+root for that run.
 
 ## Commands
 
 The command surface is intentionally small:
 
 ```bash
-tmdbtag              # Start the interactive organization workflow
-tmdbtag config       # Reopen and update TMDB and optionally S3 configuration
-tmdbtag --help       # Show help without starting the wizard
-tmdbtag --version    # Show the installed version
+tmdbtag                # Start the interactive organization workflow
+tmdbtag config         # Reopen and update the saved TMDB configuration
+tmdbtag storage add    # Add one named S3 bucket to the local catalog
+tmdbtag storage remove # Remove one named S3 bucket from the local catalog
+tmdbtag --help         # Show help without starting the wizard
+tmdbtag --version      # Show the installed version
 ```
 
 The `tmdbtag config` command uses the same validation, prompts, persistence, and
 secret handling as the normal startup flow. It always reopens the TMDB fields
-and then offers to configure or replace the saved S3 profile. It changes
-configuration only; it never scans media or starts a copy/move operation.
+and changes only TMDB configuration; it never scans media or starts a copy/move
+operation. Use `tmdbtag storage add` and `tmdbtag storage remove` to manage the
+saved S3 bucket catalog.
+
+`tmdbtag storage add` collects one named bucket and appends it to the catalog
+without changing the other buckets or the TMDB settings. `tmdbtag storage
+remove` displays the saved buckets, asks for confirmation, and removes only the
+selected entry. Neither storage command contacts TMDB or touches media files.
 
 Help, version, command-help, and invalid-command paths are handled by `clap`
 before the wizard. They do not require a TMDB key, a network connection, or a
@@ -189,7 +204,7 @@ On Unix-like systems, `tmdbtag` uses private permissions for the configuration
 directory and file when it creates them. The key is never included in filenames,
 previews, plans, logs, errors, or debug output.
 
-### Storage selection and S3 profiles
+### Storage selection and the S3 bucket catalog
 
 After TMDB configuration, the organization wizard asks for two independent
 backends:
@@ -198,33 +213,48 @@ backends:
 - **Destination storage** — the local filesystem or S3-compatible object
   storage.
 
-The first S3-enabled run asks for one profile containing:
+The catalog can contain any number of independently named buckets. Adding one
+asks for:
 
-- access key;
-- secret key, entered with masked input;
-- bucket name;
-- optional base path/prefix;
-- optional custom endpoint URL; pressing Enter uses `https://s3.amazonaws.com`,
-  the standard AWS S3 endpoint;
-- signing region.
+- a local storage name used by selectors and `storage remove`;
+- an access key;
+- a secret key, entered with masked input;
+- a bucket name;
+- an optional custom endpoint URL; pressing Enter uses
+  `https://s3.amazonaws.com`, the standard AWS S3 endpoint;
+- a signing region.
 
-The profile is stored beside the TMDB settings in `~/.tmdbtag/config.json`. When
-it is complete and valid, later organization runs reuse it without asking for
-the fields again. The `tmdbtag config` command offers an explicit way to replace
-it. Credentials are held in memory only for the current process after loading
-and are never rendered in previews, progress messages, errors, or debug output.
+Each entry is stored beside the TMDB settings in
+`~/.tmdbtag/config.json`. Complete entries are reused without prompting on later
+runs. The `storage add` and `storage remove` commands are the supported way to
+manage this catalog. Credentials are held in memory only for the current
+process after loading and are never rendered in previews, progress messages,
+errors, or debug output.
+
+The organization wizard handles the catalog deliberately. If S3 is selected on
+either side and the catalog is empty, the wizard requires one bucket to be added
+before it can continue. If multiple buckets exist, it displays an independent
+selector for each S3 role. This makes all of these workflows possible without
+reconfiguring anything:
+
+- local source → S3 destination bucket `archive`;
+- S3 source bucket `incoming` → local destination;
+- S3 source bucket `incoming` → S3 destination bucket `organized`;
+- the same bucket used on both sides with different prefixes.
 
 The S3 endpoint is optional. Leave it empty to use AWS's standard endpoint,
 `https://s3.amazonaws.com`. Provide a custom endpoint only when using an
 S3-compatible service that requires one, such as a self-hosted or alternative
 object-storage provider.
 
-The base path is the S3 equivalent of the source root. Source discovery lists
-objects beneath that prefix recursively, and an S3 destination is entered as a
-prefix relative to it. An empty destination prefix means the configured base
-path itself. S3 object keys are shown relative to the configured source or
-destination prefix, just as local paths are shown relative to the current
-directory.
+S3 prefixes are selected per organization run and are not part of a saved
+bucket entry. When the source is S3, `tmdbtag` asks for `S3 source prefix
+(optional; empty = bucket root)`. Discovery then lists objects recursively
+under that prefix, and the explorer displays paths relative to it. When the
+destination is S3, it asks for `S3 destination prefix (optional; empty = bucket
+root)`. Generated object keys are placed under that prefix. The two prompts are
+independent, so a source prefix is never accidentally reused as a destination
+prefix.
 
 The same organization plan supports all combinations:
 
@@ -233,13 +263,15 @@ The same organization plan supports all combinations:
 | Local  | Local       | Verified destination-side local copy                               |
 | Local  | S3          | Bounded local-to-S3 upload                                         |
 | S3     | Local       | S3 download to a local temporary file, then no-replace publication |
-| S3     | S3          | S3 server-side object copy                                         |
+| S3     | S3          | Server-side S3 copy for a shared endpoint; verified temporary bridge otherwise |
 
 For `Move`, the destination is always verified first. A local-to-S3 or
 S3-to-local move removes the source only after the cross-storage copy has
 published successfully. An S3-to-S3 move uses server-side `CopyObject` followed
-by a conditional source deletion; it does not download the object through the
-CLI.
+by a conditional source deletion when both buckets use the same endpoint. When
+the selected buckets use different endpoints, `tmdbtag` safely bridges the
+transfer through a private local temporary file, verifies the destination, and
+deletes the source only after successful publication.
 
 ### One explorer for the whole source tree
 
@@ -403,9 +435,10 @@ is deferred until the commit phase.
 
 The local destination cannot be the current source directory, cannot overlap a
 selected nested source container, and is excluded from discovery when it is
-inside the current source tree. For S3, the configured base prefix cannot also
-be the destination prefix, and the destination prefix is excluded from source
-listing when both sides use the same S3 profile.
+inside the current source tree. For S3, a source prefix cannot also be the
+destination prefix in the same selected bucket, and the destination prefix is
+excluded from source listing when both sides address the same bucket and
+endpoint.
 
 `tmdbtag` never overwrites an existing destination by default. If a source
 disappears or changes, or an unexpected operation fails, execution stops by
@@ -469,14 +502,16 @@ The persisted configuration is small and explicit:
 {
   "tmdb_api_key": "your-tmdb-api-key",
   "tmdb_language": "pt-BR",
-  "s3": {
-    "access_key": "your-s3-access-key",
-    "secret_key": "your-s3-secret-key",
-    "bucket": "your-bucket",
-    "base_path": "optional/media/prefix",
-    "endpoint": "https://s3.example.com",
-    "region": "us-east-1"
-  }
+  "s3": [
+    {
+      "name": "primary",
+      "access_key": "your-s3-access-key",
+      "secret_key": "your-s3-secret-key",
+      "bucket": "your-bucket",
+      "endpoint": "https://s3.example.com",
+      "region": "us-east-1"
+    }
+  ]
 }
 ```
 
@@ -486,20 +521,27 @@ Location:
 ~/.tmdbtag/config.json
 ```
 
+The `s3` value is an array because each entry represents one independently
+selectable bucket. Older single-object S3 configurations can still be read for
+compatibility; the former `base_path` value is ignored, and the next write
+converts the data to the current catalog format. Choose the desired source and
+destination prefixes during each organization run instead.
+
 The language controls the language requested from TMDB for titles and metadata.
 It does not translate the CLI. All application-owned prompts, labels, help text,
 progress messages, errors, and reports are in English.
 
-To change the TMDB values intentionally, and optionally replace the S3 profile:
+To change the TMDB values intentionally:
 
 ```bash
 tmdbtag config
 ```
 
 The command asks for both TMDB fields even when a complete configuration already
-exists. It then asks whether the S3 profile should be configured or replaced. It
-is the supported way to replace credentials or switch metadata language without
-starting a media workflow.
+exists. To add another S3 bucket, use `tmdbtag storage add`; to remove one, use
+`tmdbtag storage remove`. Prefixes are intentionally absent from this file:
+`S3 source prefix` and `S3 destination prefix` belong to one organization run
+and are relative to the selected bucket root.
 
 For local automation or development environments, `TMDB_API_KEY` and
 `TMDB_LANGUAGE` may provide fallback defaults for missing saved fields. They do

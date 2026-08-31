@@ -70,7 +70,7 @@ impl fmt::Display for FileOperation {
 pub enum StorageKind {
     /// The process current directory and the local operating-system filesystem.
     Local,
-    /// An S3-compatible object bucket and its configured base prefix.
+    /// An S3-compatible object bucket selected from the saved bucket catalog.
     S3,
 }
 
@@ -796,6 +796,8 @@ pub enum RunOutcome {
     MediaSelectionReady,
     /// The saved TMDB configuration was intentionally updated by the `config` command.
     ConfigurationUpdated,
+    /// The saved S3 bucket catalog was intentionally updated by a storage command.
+    StorageUpdated,
     /// The confirmed plan completed all file operations successfully.
     Completed,
     /// Execution stopped after one or more operations failed.
@@ -811,6 +813,7 @@ impl RunOutcome {
             | Self::StartupConfigured
             | Self::MediaSelectionReady
             | Self::ConfigurationUpdated
+            | Self::StorageUpdated
             | Self::Completed => 0,
         }
     }

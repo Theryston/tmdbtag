@@ -41,7 +41,7 @@ const TMDB_LIVE_SEARCH_RESERVED_LINES: usize = 6;
     version,
     about = "Organize video files with verified TMDB metadata.",
     long_about = "A polished interactive CLI for selecting video files, identifying movies or TV series in TMDB, and preparing safe metadata-bearing filenames.",
-    after_help = "Examples:\n  tmdbtag\n  tmdbtag config\n  tmdbtag --help\n  tmdbtag --version"
+    after_help = "Examples:\n  tmdbtag\n  tmdbtag config\n  tmdbtag storage add\n  tmdbtag storage remove\n  tmdbtag --help\n  tmdbtag --version"
 )]
 pub struct Cli {
     /// Optional explicit command. Omitting it starts the organization wizard.
@@ -52,9 +52,23 @@ pub struct Cli {
 /// Explicit commands exposed by the clap boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Subcommand)]
 pub enum CliCommand {
-    /// Create or update the saved TMDB and S3 storage configuration.
-    #[command(about = "Create or update the saved TMDB and S3 configuration.")]
+    /// Create or update the saved TMDB configuration.
+    #[command(about = "Create or update the saved TMDB configuration.")]
     Config,
+    /// Manage saved S3 buckets.
+    #[command(subcommand)]
+    Storage(StorageCommand),
+}
+
+/// Commands for managing the saved S3 bucket catalog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Subcommand)]
+pub enum StorageCommand {
+    /// Add a named S3 bucket to the local catalog.
+    #[command(about = "Add a named S3 bucket to the local catalog.")]
+    Add,
+    /// Remove one named S3 bucket from the local catalog.
+    #[command(about = "Remove a named S3 bucket from the local catalog.")]
+    Remove,
 }
 
 /// Executes the selected command after `clap` has parsed it.
@@ -66,6 +80,12 @@ pub fn execute(cli: Cli) -> AppResult<RunOutcome> {
 
     match cli.command {
         Some(CliCommand::Config) => app::run_config(&mut ui, env!("CARGO_PKG_VERSION")),
+        Some(CliCommand::Storage(StorageCommand::Add)) => {
+            app::run_storage_add(&mut ui, env!("CARGO_PKG_VERSION"))
+        }
+        Some(CliCommand::Storage(StorageCommand::Remove)) => {
+            app::run_storage_remove(&mut ui, env!("CARGO_PKG_VERSION"))
+        }
         None => app::run(&mut ui, env!("CARGO_PKG_VERSION")),
     }
 }
@@ -883,9 +903,7 @@ impl InteractiveUi for TerminalUi {
     fn ask_storage_destination_path(&mut self, kind: StorageKind) -> UiResult<Option<String>> {
         let prompt = match kind {
             StorageKind::Local => "Local destination folder path",
-            StorageKind::S3 => {
-                "S3 destination prefix (relative to the configured base path; empty = base path)"
-            }
+            StorageKind::S3 => "S3 destination prefix (optional; empty = bucket root)",
         };
         self.ask_text(prompt, None)
     }
@@ -1035,18 +1053,6 @@ impl InteractiveUi for TerminalUi {
             }
         }
         self.write_line("")
-    }
-
-    fn confirm_s3_configuration_update(
-        &mut self,
-        has_existing_configuration: bool,
-    ) -> UiResult<Option<bool>> {
-        let prompt = if has_existing_configuration {
-            "Update the saved S3 storage configuration now?"
-        } else {
-            "Configure S3 storage now?"
-        };
-        self.confirm(prompt, false)
     }
 
     fn show_file_context(
@@ -1718,6 +1724,18 @@ mod tests {
         let parsed = Cli::try_parse_from(["tmdbtag", "config"]).unwrap();
 
         assert_eq!(parsed.command, Some(CliCommand::Config));
+    }
+
+    #[test]
+    fn storage_catalog_commands_are_parsed_as_nested_clap_subcommands() {
+        let add = Cli::try_parse_from(["tmdbtag", "storage", "add"]).unwrap();
+        let remove = Cli::try_parse_from(["tmdbtag", "storage", "remove"]).unwrap();
+
+        assert_eq!(add.command, Some(CliCommand::Storage(StorageCommand::Add)));
+        assert_eq!(
+            remove.command,
+            Some(CliCommand::Storage(StorageCommand::Remove))
+        );
     }
 
     #[test]

@@ -7,6 +7,7 @@
 //! outside this module.
 
 use std::{
+    any::Any,
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
     path::{Component, Path, PathBuf},
@@ -42,7 +43,7 @@ static NEXT_TEMP_FILE_ID: AtomicU64 = AtomicU64::new(1);
 pub enum StoragePath {
     /// An exact local filesystem path.
     Local(PathBuf),
-    /// A normalized full object key, including the configured S3 base prefix.
+    /// A normalized full object key, including the selected per-run S3 prefix.
     S3(String),
 }
 
@@ -656,8 +657,19 @@ impl StorageTransferProgress {
 
 /// The common boundary implemented by every source and destination storage backend.
 pub trait StorageBackend {
+    /// Exposes the concrete backend only to the storage boundary for same-kind transfers.
+    fn as_any(&self) -> &dyn Any;
+
     /// Returns the stable backend kind.
     fn kind(&self) -> StorageKind;
+
+    /// Returns a safe namespace identity used to decide whether prefixes can be compared.
+    fn namespace_id(&self) -> String;
+
+    /// Returns whether two backends address the same storage namespace.
+    fn same_namespace(&self, other: &dyn StorageBackend) -> bool {
+        self.namespace_id() == other.namespace_id()
+    }
 
     /// Returns an English, credential-free description for previews.
     fn description(&self) -> String;
@@ -682,6 +694,7 @@ pub trait StorageBackend {
     /// Validates the destination state and its relationship with the source root.
     fn validate_destination(
         &self,
+        source_backend: &dyn StorageBackend,
         source_root: &StoragePath,
         destination: &StorageDestination,
     ) -> Result<(), StorageError>;
@@ -706,6 +719,24 @@ pub trait StorageBackend {
         snapshot: &StorageSnapshot,
         on_progress: &mut dyn FnMut(u64),
     ) -> Result<(), StorageError>;
+
+    /// Transfers one object from another backend of the same storage kind.
+    ///
+    /// Backends use this hook when the source and destination are different configured S3
+    /// buckets. The default delegates to the within-backend operation for local storage.
+    fn transfer_between(
+        &self,
+        source_backend: &dyn StorageBackend,
+        source: &StoragePath,
+        destination: &StoragePath,
+        snapshot: &StorageSnapshot,
+        on_progress: &mut dyn FnMut(u64),
+    ) -> Result<(), StorageError> {
+        if self.kind() != source_backend.kind() {
+            return Err(StorageError::UnsupportedTransfer);
+        }
+        self.transfer_within(source, destination, snapshot, on_progress)
+    }
 
     /// Downloads one source object into a local destination-side temporary file.
     fn download_to_file(
@@ -766,8 +797,16 @@ impl LocalStorage {
 }
 
 impl StorageBackend for LocalStorage {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
     fn kind(&self) -> StorageKind {
         StorageKind::Local
+    }
+
+    fn namespace_id(&self) -> String {
+        "local-current-directory".to_owned()
     }
 
     fn description(&self) -> String {
@@ -858,6 +897,7 @@ impl StorageBackend for LocalStorage {
 
     fn validate_destination(
         &self,
+        _source_backend: &dyn StorageBackend,
         source_root: &StoragePath,
         destination: &StorageDestination,
     ) -> Result<(), StorageError> {
@@ -1069,8 +1109,9 @@ impl StorageBackend for LocalStorage {
 pub struct S3Storage {
     client: Client,
     runtime: tokio::runtime::Runtime,
+    profile_name: String,
     bucket: String,
-    base_path: String,
+    prefix: String,
     endpoint: String,
 }
 
@@ -1078,16 +1119,23 @@ impl std::fmt::Debug for S3Storage {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("S3Storage")
+            .field("profile_name", &self.profile_name)
             .field("bucket", &self.bucket)
-            .field("base_path", &self.base_path)
+            .field("prefix", &self.prefix)
             .field("endpoint", &self.endpoint)
             .finish_non_exhaustive()
     }
 }
 
 impl S3Storage {
-    /// Creates an S3 client using the explicitly configured endpoint and static credentials.
+    /// Creates an S3 client rooted at the bucket root.
     pub fn new(config: &S3Config) -> Result<Self, StorageError> {
+        Self::with_prefix(config, "")
+    }
+
+    /// Creates an S3 client rooted at a validated per-run source or destination prefix.
+    pub fn with_prefix(config: &S3Config, prefix: &str) -> Result<Self, StorageError> {
+        let prefix = normalize_s3_key(prefix)?;
         let credentials = Credentials::new(
             config.access_key(),
             config.secret_key(),
@@ -1112,8 +1160,9 @@ impl S3Storage {
         Ok(Self {
             client: Client::from_conf(sdk_config),
             runtime,
+            profile_name: config.name().to_owned(),
             bucket: config.bucket().to_owned(),
-            base_path: config.base_path().to_owned(),
+            prefix,
             endpoint: config.endpoint().to_owned(),
         })
     }
@@ -1211,24 +1260,32 @@ where
 }
 
 impl StorageBackend for S3Storage {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
     fn kind(&self) -> StorageKind {
         StorageKind::S3
     }
 
+    fn namespace_id(&self) -> String {
+        format!("s3://{}/{}", self.endpoint, self.bucket)
+    }
+
     fn description(&self) -> String {
-        let prefix = if self.base_path.is_empty() {
+        let prefix = if self.prefix.is_empty() {
             "(bucket root)".to_owned()
         } else {
-            self.base_path.clone()
+            self.prefix.clone()
         };
         format!(
-            "S3-compatible storage · bucket {} · prefix {} · endpoint {}",
-            self.bucket, prefix, self.endpoint
+            "S3 storage `{}` · bucket {} · prefix {} · endpoint {}",
+            self.profile_name, self.bucket, prefix, self.endpoint
         )
     }
 
     fn source_root(&self) -> Result<StoragePath, StorageError> {
-        Ok(StoragePath::S3(self.base_path.clone()))
+        Ok(StoragePath::S3(self.prefix.clone()))
     }
 
     fn resolve_destination(
@@ -1237,12 +1294,12 @@ impl StorageBackend for S3Storage {
         input: &str,
     ) -> Result<StorageDestination, StorageError> {
         let relative = normalize_s3_key(input)?;
-        let key = if self.base_path.is_empty() {
+        let key = if self.prefix.is_empty() {
             relative
         } else if relative.is_empty() {
-            self.base_path.clone()
+            self.prefix.clone()
         } else {
-            join_s3_key(&self.base_path, &relative)
+            join_s3_key(&self.prefix, &relative)
         };
         Ok(StorageDestination::new(StoragePath::S3(key), true, false))
     }
@@ -1322,6 +1379,7 @@ impl StorageBackend for S3Storage {
 
     fn validate_destination(
         &self,
+        source_backend: &dyn StorageBackend,
         source_root: &StoragePath,
         destination: &StorageDestination,
     ) -> Result<(), StorageError> {
@@ -1330,7 +1388,7 @@ impl StorageBackend for S3Storage {
             return Ok(());
         };
         let destination_key = self.s3_key(destination.path())?;
-        if source_key == destination_key {
+        if self.same_namespace(source_backend) && source_key == destination_key {
             return Err(StorageError::InvalidPath {
                 path: if destination_key.is_empty() {
                     ".".to_owned()
@@ -1401,27 +1459,45 @@ impl StorageBackend for S3Storage {
         snapshot: &StorageSnapshot,
         on_progress: &mut dyn FnMut(u64),
     ) -> Result<(), StorageError> {
-        let source_key = self.s3_key(source)?;
-        let destination_key = self.s3_key(destination)?;
-        let copy_source = format!(
-            "{}/{}",
-            self.bucket,
-            urlencoding::encode(source_key).into_owned()
-        );
-        let mut request = self
-            .client
-            .copy_object()
-            .bucket(&self.bucket)
-            .key(destination_key)
-            .copy_source(copy_source)
-            .if_none_match("*");
-        if let Some(etag) = snapshot.identity() {
-            request = request.copy_source_if_match(etag);
+        self.copy_from_s3(self, source, destination, snapshot, on_progress)
+    }
+
+    fn transfer_between(
+        &self,
+        source_backend: &dyn StorageBackend,
+        source: &StoragePath,
+        destination: &StoragePath,
+        snapshot: &StorageSnapshot,
+        on_progress: &mut dyn FnMut(u64),
+    ) -> Result<(), StorageError> {
+        let source_storage = source_backend
+            .as_any()
+            .downcast_ref::<S3Storage>()
+            .ok_or(StorageError::UnsupportedTransfer)?;
+        if source_storage.endpoint == self.endpoint {
+            return self.copy_from_s3(source_storage, source, destination, snapshot, on_progress);
         }
-        self.runtime
-            .block_on(request.send())
-            .map_err(|error| map_s3_error(&error, "copying an S3 object"))?;
-        on_progress(snapshot.size_bytes());
+
+        // CopyObject cannot cross independent S3-compatible endpoints. Use a private local
+        // temporary file as a safe compatibility path while retaining the same no-replace and
+        // source-verification guarantees at the destination and move commit points.
+        let temporary = create_cross_storage_temporary_file()?;
+        let download = source_storage.download_to_file(source, &temporary, snapshot, on_progress);
+        if let Err(error) = download {
+            let _ = fs::remove_file(&temporary);
+            return Err(error);
+        }
+
+        let upload = self.upload_from_file(&temporary, destination, snapshot, &mut |_| {});
+        let cleanup = fs::remove_file(&temporary);
+        if let Err(error) = upload {
+            let _ = cleanup;
+            return Err(error);
+        }
+        cleanup.map_err(|error| StorageError::TemporaryCleanup {
+            path: temporary.to_string_lossy().into_owned(),
+            message: error.to_string(),
+        })?;
         Ok(())
     }
 
@@ -1554,6 +1630,65 @@ impl StorageBackend for S3Storage {
     }
 }
 
+impl S3Storage {
+    fn copy_from_s3(
+        &self,
+        source_storage: &S3Storage,
+        source: &StoragePath,
+        destination: &StoragePath,
+        snapshot: &StorageSnapshot,
+        on_progress: &mut dyn FnMut(u64),
+    ) -> Result<(), StorageError> {
+        let source_key = source_storage.s3_key(source)?;
+        let destination_key = self.s3_key(destination)?;
+        let copy_source = format!(
+            "{}/{}",
+            source_storage.bucket,
+            urlencoding::encode(source_key).into_owned()
+        );
+        let mut request = self
+            .client
+            .copy_object()
+            .bucket(&self.bucket)
+            .key(destination_key)
+            .copy_source(copy_source)
+            .if_none_match("*");
+        if let Some(etag) = snapshot.identity() {
+            request = request.copy_source_if_match(etag);
+        }
+        self.runtime
+            .block_on(request.send())
+            .map_err(|error| map_s3_error(&error, "copying an S3 object"))?;
+        on_progress(snapshot.size_bytes());
+        Ok(())
+    }
+}
+
+fn create_cross_storage_temporary_file() -> Result<PathBuf, StorageError> {
+    let directory = std::env::temp_dir();
+    let process_id = std::process::id();
+    for attempt in 0..100_u64 {
+        let id = NEXT_TEMP_FILE_ID.fetch_add(1, Ordering::Relaxed);
+        let path = directory.join(format!(
+            ".tmdbtag.cross-storage.{process_id}.{id}.{attempt}.tmp"
+        ));
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(_) => return Ok(path),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(StorageError::Local {
+                    operation: "creating a cross-endpoint transfer temporary file",
+                    message: error.to_string(),
+                });
+            }
+        }
+    }
+    Err(StorageError::Local {
+        operation: "creating a cross-endpoint transfer temporary file",
+        message: "could not find an unused temporary filename".to_owned(),
+    })
+}
+
 fn upload_multipart(
     storage: &S3Storage,
     source: &Path,
@@ -1679,7 +1814,11 @@ pub fn validate_plan(
         });
     }
 
-    destination_backend.validate_destination(&plan.source_root, &plan.destination)?;
+    destination_backend.validate_destination(
+        source_backend,
+        &plan.source_root,
+        &plan.destination,
+    )?;
     let mut source_paths = Vec::new();
     let mut destination_paths = Vec::new();
 
@@ -1852,7 +1991,8 @@ fn execute_one(
     }
 
     if operation.source_path.kind() == operation.destination_path.kind() {
-        destination_backend.transfer_within(
+        destination_backend.transfer_between(
+            source_backend,
             &operation.source_path,
             &operation.destination_path,
             &operation.source_snapshot,
@@ -2179,6 +2319,72 @@ mod tests {
         assert!(normalize_s3_key("library/../outside").is_err());
         assert!(normalize_s3_key("/absolute").is_err());
         assert!(normalize_s3_key("library\\outside").is_err());
+    }
+
+    #[test]
+    fn s3_backend_uses_per_run_prefixes_and_keeps_bucket_namespaces_independent() {
+        let source_config = S3Config::new(
+            "incoming".to_owned(),
+            "access".to_owned(),
+            "secret".to_owned(),
+            "source-bucket".to_owned(),
+            String::new(),
+            "us-east-1".to_owned(),
+        )
+        .unwrap();
+        let destination_config = S3Config::new(
+            "organized".to_owned(),
+            "access".to_owned(),
+            "secret".to_owned(),
+            "destination-bucket".to_owned(),
+            String::new(),
+            "us-east-1".to_owned(),
+        )
+        .unwrap();
+        let source = S3Storage::with_prefix(&source_config, "incoming/media/").unwrap();
+        let destination = S3Storage::new(&destination_config).unwrap();
+
+        assert_eq!(
+            source.source_root().unwrap(),
+            StoragePath::S3("incoming/media".to_owned())
+        );
+        assert_eq!(
+            destination
+                .resolve_destination(&StoragePath::S3(String::new()), "organized")
+                .unwrap()
+                .path(),
+            &StoragePath::S3("organized".to_owned())
+        );
+        assert!(!source.same_namespace(&destination));
+        assert!(source.description().contains("prefix incoming/media"));
+        assert!(!source.description().contains("access"));
+    }
+
+    #[test]
+    fn s3_backends_with_the_same_bucket_and_endpoint_share_a_namespace() {
+        let first_config = S3Config::new(
+            "first".to_owned(),
+            "access-one".to_owned(),
+            "secret-one".to_owned(),
+            "shared-bucket".to_owned(),
+            "https://s3.example.test/".to_owned(),
+            "us-east-1".to_owned(),
+        )
+        .unwrap();
+        let second_config = S3Config::new(
+            "second".to_owned(),
+            "access-two".to_owned(),
+            "secret-two".to_owned(),
+            "shared-bucket".to_owned(),
+            "https://s3.example.test".to_owned(),
+            "eu-west-1".to_owned(),
+        )
+        .unwrap();
+
+        let first = S3Storage::new(&first_config).unwrap();
+        let second = S3Storage::new(&second_config).unwrap();
+
+        assert!(first.same_namespace(&second));
     }
 
     #[test]

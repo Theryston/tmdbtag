@@ -17,21 +17,36 @@ pub enum ConfigError {
     /// The S3 access key was not provided.
     #[error("An S3 access key is required when S3 storage is selected.")]
     MissingS3AccessKey,
+    /// The S3 profile name was not provided.
+    #[error("An S3 storage name is required when adding an S3 bucket.")]
+    MissingS3Name,
     /// The S3 secret key was not provided.
     #[error("An S3 secret key is required when S3 storage is selected.")]
     MissingS3SecretKey,
     /// The S3 bucket name was not provided.
     #[error("An S3 bucket name is required when S3 storage is selected.")]
     MissingS3Bucket,
+    /// The S3 profile name contains unsupported control characters.
+    #[error("The S3 storage name is invalid.")]
+    InvalidS3Name,
+    /// Another profile already uses the selected S3 profile name.
+    #[error("An S3 storage named `{name}` is already configured.")]
+    DuplicateS3Name {
+        /// The display-safe duplicate profile name.
+        name: String,
+    },
+    /// The selected S3 profile was removed or could not be found.
+    #[error("The saved S3 storage `{name}` could not be found.")]
+    S3ProfileNotFound {
+        /// The display-safe profile name.
+        name: String,
+    },
     /// The S3 region was not provided.
     #[error("An S3 region is required when S3 storage is selected.")]
     MissingS3Region,
     /// The S3 endpoint is not an HTTP(S) endpoint.
     #[error("The S3 endpoint must be an HTTP or HTTPS URL with a host.")]
     InvalidS3Endpoint,
-    /// The S3 base prefix contains unsafe path components.
-    #[error("The S3 base path must contain only safe object-key components.")]
-    InvalidS3BasePath,
     /// The S3 signing region contains unsupported whitespace or control characters.
     #[error("The S3 region is invalid.")]
     InvalidS3Region,
@@ -90,14 +105,17 @@ impl ConfigError {
         match self {
             Self::MissingApiKey
             | Self::InvalidLanguage
+            | Self::MissingS3Name
             | Self::MissingS3AccessKey
             | Self::MissingS3SecretKey
             | Self::MissingS3Bucket
             | Self::MissingS3Region
             | Self::InvalidS3Endpoint
-            | Self::InvalidS3BasePath
             | Self::InvalidS3Region
             | Self::InvalidS3Bucket
+            | Self::InvalidS3Name
+            | Self::DuplicateS3Name { .. }
+            | Self::S3ProfileNotFound { .. }
             | Self::InvalidFile { .. } => 2,
             Self::HomeDirectoryUnavailable
             | Self::Read { .. }

@@ -77,37 +77,40 @@ impl fmt::Debug for StartupConfig {
     }
 }
 
-/// Validated credentials and endpoint settings for one S3-compatible bucket.
+/// Validated credentials and connection settings for one named S3 bucket.
 ///
-/// The application intentionally supports a single S3 profile per user for the first storage
-/// integration. The same profile can be used as the source, destination, or both in one run.
-/// Secret values are kept behind accessors and are redacted from debug output.
-#[derive(Clone)]
+/// S3 profiles are persisted in a user-owned catalog. A profile deliberately contains connection
+/// details only; source and destination prefixes belong to one organization run and are never
+/// persisted with the credentials. Secret values are kept behind accessors and are redacted from
+/// debug output.
+#[derive(Clone, PartialEq, Eq)]
 pub struct S3Config {
+    name: String,
     access_key: String,
     secret_key: String,
     bucket: String,
-    base_path: String,
     endpoint: String,
     region: String,
 }
 
 impl S3Config {
-    /// Creates a validated S3 configuration from interactive or persisted values.
+    /// Creates a validated named S3 configuration from interactive or persisted values.
     pub fn new(
+        name: String,
         access_key: String,
         secret_key: String,
         bucket: String,
-        base_path: String,
         endpoint: String,
         region: String,
     ) -> Result<Self, ConfigError> {
+        let name = required_s3_value(name, ConfigError::MissingS3Name);
         let access_key = required_s3_value(access_key, ConfigError::MissingS3AccessKey);
         let secret_key = required_s3_value(secret_key, ConfigError::MissingS3SecretKey);
         let bucket = required_s3_value(bucket, ConfigError::MissingS3Bucket);
         let region = required_s3_value(region, ConfigError::MissingS3Region);
 
-        let (access_key, secret_key, bucket, region) = (access_key?, secret_key?, bucket?, region?);
+        let (name, access_key, secret_key, bucket, region) =
+            (name?, access_key?, secret_key?, bucket?, region?);
         let endpoint = endpoint.trim().to_owned();
         let endpoint = if endpoint.is_empty() {
             DEFAULT_S3_ENDPOINT.to_owned()
@@ -115,6 +118,9 @@ impl S3Config {
             endpoint
         };
 
+        if name.chars().any(char::is_control) {
+            return Err(ConfigError::InvalidS3Name);
+        }
         if bucket.chars().any(|character| {
             character.is_whitespace() || character.is_control() || character == '/'
         }) {
@@ -140,16 +146,20 @@ impl S3Config {
         }
 
         let endpoint = endpoint.trim_end_matches('/').to_owned();
-        let base_path = normalize_s3_base_path(&base_path)?;
 
         Ok(Self {
+            name,
             access_key,
             secret_key,
             bucket,
-            base_path,
             endpoint,
             region,
         })
+    }
+
+    /// Returns the user-facing name used to identify this saved S3 bucket.
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     /// Returns the access key used to create the in-memory S3 client.
@@ -167,11 +177,6 @@ impl S3Config {
         &self.bucket
     }
 
-    /// Returns the optional object-key prefix used as the S3 root.
-    pub fn base_path(&self) -> &str {
-        &self.base_path
-    }
-
     /// Returns the endpoint URL used by the S3-compatible client.
     pub fn endpoint(&self) -> &str {
         &self.endpoint
@@ -181,16 +186,21 @@ impl S3Config {
     pub fn region(&self) -> &str {
         &self.region
     }
+
+    /// Returns a credential-free label suitable for profile selectors and diagnostics.
+    pub fn display_label(&self) -> String {
+        format!("{} · bucket {} · {}", self.name, self.bucket, self.region)
+    }
 }
 
 impl fmt::Debug for S3Config {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("S3Config")
+            .field("name", &self.name)
             .field("access_key", &"[REDACTED]")
             .field("secret_key", &"[REDACTED]")
             .field("bucket", &self.bucket)
-            .field("base_path", &self.base_path)
             .field("endpoint", &self.endpoint)
             .field("region", &self.region)
             .finish()
@@ -261,9 +271,9 @@ impl ConfigStore {
         })
     }
 
-    /// Loads a complete, valid S3 profile when one is saved in the configuration file.
-    pub fn load_s3(&self) -> Result<Option<S3Config>, ConfigError> {
-        Ok(self.load()?.s3_config())
+    /// Loads every complete, valid S3 bucket saved in the configuration file.
+    pub fn load_s3_profiles(&self) -> Result<Vec<S3Config>, ConfigError> {
+        Ok(self.load()?.s3_profiles())
     }
 
     fn save(&self, config: &StartupConfig) -> Result<(), ConfigError> {
@@ -277,21 +287,58 @@ impl ConfigStore {
             StartupConfigValues {
                 tmdb_api_key: Some(config.tmdb_api_key.clone()),
                 tmdb_language: Some(config.tmdb_language.clone()),
-                // Preserve a partially configured profile so selecting S3 later can explain and
-                // repair it instead of silently discarding values during an unrelated TMDB save.
+                // Preserve every S3 profile so an unrelated TMDB update cannot discard storage
+                // connections.
                 s3: stored.s3,
             },
             directory,
         )
     }
 
-    /// Persists S3 settings while retaining the current TMDB settings.
-    fn save_s3(&self, s3: &S3Config) -> Result<(), ConfigError> {
-        let stored = match self.load() {
-            Ok(stored) => stored,
-            Err(ConfigError::InvalidFile { .. }) => StoredConfig::default(),
-            Err(error) => return Err(error),
-        };
+    /// Adds one named S3 bucket while retaining TMDB settings and existing buckets.
+    pub fn add_s3_profile(&self, s3: &S3Config) -> Result<(), ConfigError> {
+        let stored = self.load()?;
+        if stored.s3.iter().any(|profile| {
+            profile
+                .logical_name()
+                .is_some_and(|name| name.trim().eq_ignore_ascii_case(s3.name()))
+        }) {
+            return Err(ConfigError::DuplicateS3Name {
+                name: s3.name().to_owned(),
+            });
+        }
+
+        let directory = self
+            .path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let mut profiles = stored.s3;
+        profiles.push(StoredS3Config::from_config(s3));
+        self.write_stored(
+            StartupConfigValues {
+                tmdb_api_key: stored.tmdb_api_key,
+                tmdb_language: stored.tmdb_language,
+                s3: profiles,
+            },
+            directory,
+        )
+    }
+
+    /// Removes one named S3 bucket and reports whether a profile was removed.
+    pub fn remove_s3_profile(&self, name: &str) -> Result<bool, ConfigError> {
+        let stored = self.load()?;
+        let mut profiles = stored.s3;
+        let original_count = profiles.len();
+        profiles.retain(|profile| {
+            !profile
+                .logical_name()
+                .is_some_and(|profile_name| profile_name.trim().eq_ignore_ascii_case(name.trim()))
+        });
+        if profiles.len() == original_count {
+            return Ok(false);
+        }
+
         let directory = self
             .path
             .parent()
@@ -301,10 +348,11 @@ impl ConfigStore {
             StartupConfigValues {
                 tmdb_api_key: stored.tmdb_api_key,
                 tmdb_language: stored.tmdb_language,
-                s3: Some(StoredS3Config::from_config(s3)),
+                s3: profiles,
             },
             directory,
-        )
+        )?;
+        Ok(true)
     }
 
     fn write_stored(
@@ -480,114 +528,54 @@ pub fn configure_interactively<U: InteractiveUi>(
     }
 }
 
-/// Determines whether the shared S3 configuration flow should reuse a valid saved profile or
-/// reopen every S3 field.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum S3ConfigPromptMode {
-    /// Ask only when the saved S3 profile is absent or invalid.
-    MissingOnly,
-    /// Reopen every S3 field so the explicit `config` command can replace the profile.
-    ReplaceAll,
-}
-
-/// Loads the saved S3 profile or collects and persists one through the shared interactive flow.
-///
-/// The normal organization workflow uses [`S3ConfigPromptMode::MissingOnly`], which means a
-/// complete profile never causes another credential prompt. The explicit configuration command
-/// uses [`S3ConfigPromptMode::ReplaceAll`] when the user asks to edit S3 settings.
+/// Collects and persists one new named S3 bucket through the shared interactive flow.
 pub fn configure_s3_interactively<U: InteractiveUi>(
     ui: &mut U,
     store: &ConfigStore,
-    mode: S3ConfigPromptMode,
 ) -> AppResult<Option<S3Config>> {
-    let stored = match store.load() {
-        Ok(config) => config,
-        Err(ConfigError::InvalidFile { .. }) if mode == S3ConfigPromptMode::ReplaceAll => {
-            ui.show_message(
-                MessageLevel::Warning,
-                "The existing configuration file is invalid and will be replaced.",
-            )?;
-            StoredConfig::default()
-        }
-        Err(error) => return Err(error.into()),
-    };
-
-    let existing = stored.s3_config();
-    if mode == S3ConfigPromptMode::MissingOnly
-        && let Some(config) = existing
-    {
-        return Ok(Some(config));
-    }
+    // Parse the existing file before collecting credentials. An explicit add command must not
+    // overwrite a malformed configuration file or silently discard the other profiles.
+    let _ = store.load()?;
 
     let total_steps = 6;
-    let mut access_key = existing
-        .as_ref()
-        .map(|config| config.access_key().to_owned());
-    let mut secret_key = existing
-        .as_ref()
-        .map(|config| config.secret_key().to_owned());
-    let mut bucket = existing.as_ref().map(|config| config.bucket().to_owned());
-    let mut base_path = existing
-        .as_ref()
-        .map(|config| config.base_path().to_owned());
-    let mut endpoint = existing.as_ref().map(|config| config.endpoint().to_owned());
-    let mut region = existing.as_ref().map(|config| config.region().to_owned());
+    let mut name = None;
+    let mut access_key = None;
+    let mut secret_key = None;
+    let mut bucket = None;
+    let mut endpoint = None;
+    let mut region = None;
 
     loop {
-        if access_key.is_none() {
-            ui.show_step(1, total_steps, "S3 access key")?;
-            let Some(value) = ui.ask_text("S3 access key", None)? else {
+        if name.is_none() {
+            ui.show_step(1, total_steps, "S3 storage name")?;
+            let Some(value) = ui.ask_text("S3 storage name", None)? else {
                 return Ok(None);
             };
-            access_key = Some(value);
-        } else if mode == S3ConfigPromptMode::ReplaceAll {
-            ui.show_step(1, total_steps, "S3 access key")?;
-            let Some(value) = ui.ask_text("S3 access key", access_key.as_deref())? else {
+            name = Some(value);
+        }
+
+        if access_key.is_none() {
+            ui.show_step(2, total_steps, "S3 access key")?;
+            let Some(value) = ui.ask_text("S3 access key", None)? else {
                 return Ok(None);
             };
             access_key = Some(value);
         }
 
         if secret_key.is_none() {
-            ui.show_step(2, total_steps, "S3 secret key")?;
+            ui.show_step(3, total_steps, "S3 secret key")?;
             let Some(value) = ui.ask_masked_secret("S3 secret key", None)? else {
-                return Ok(None);
-            };
-            secret_key = Some(value);
-        } else if mode == S3ConfigPromptMode::ReplaceAll {
-            ui.show_step(2, total_steps, "S3 secret key")?;
-            let Some(value) = ui.ask_masked_secret("S3 secret key", secret_key.as_deref())? else {
                 return Ok(None);
             };
             secret_key = Some(value);
         }
 
         if bucket.is_none() {
-            ui.show_step(3, total_steps, "S3 bucket")?;
+            ui.show_step(4, total_steps, "S3 bucket")?;
             let Some(value) = ui.ask_text("S3 bucket name", None)? else {
                 return Ok(None);
             };
             bucket = Some(value);
-        } else if mode == S3ConfigPromptMode::ReplaceAll {
-            ui.show_step(3, total_steps, "S3 bucket")?;
-            let Some(value) = ui.ask_text("S3 bucket name", bucket.as_deref())? else {
-                return Ok(None);
-            };
-            bucket = Some(value);
-        }
-
-        if base_path.is_none() {
-            ui.show_step(4, total_steps, "S3 base path")?;
-            let Some(value) = ui.ask_text("S3 base path (optional)", Some(""))? else {
-                return Ok(None);
-            };
-            base_path = Some(value);
-        } else if mode == S3ConfigPromptMode::ReplaceAll {
-            ui.show_step(4, total_steps, "S3 base path")?;
-            let Some(value) = ui.ask_text("S3 base path (optional)", base_path.as_deref())? else {
-                return Ok(None);
-            };
-            base_path = Some(value);
         }
 
         if endpoint.is_none() {
@@ -595,16 +583,6 @@ pub fn configure_s3_interactively<U: InteractiveUi>(
             let Some(value) = ui.ask_text(
                 "S3 endpoint URL (optional; press Enter for the AWS default)",
                 Some(DEFAULT_S3_ENDPOINT),
-            )?
-            else {
-                return Ok(None);
-            };
-            endpoint = Some(value);
-        } else if mode == S3ConfigPromptMode::ReplaceAll {
-            ui.show_step(5, total_steps, "S3 endpoint")?;
-            let Some(value) = ui.ask_text(
-                "S3 endpoint URL (optional; press Enter for the AWS default)",
-                endpoint.as_deref().or(Some(DEFAULT_S3_ENDPOINT)),
             )?
             else {
                 return Ok(None);
@@ -618,35 +596,33 @@ pub fn configure_s3_interactively<U: InteractiveUi>(
                 return Ok(None);
             };
             region = Some(value);
-        } else if mode == S3ConfigPromptMode::ReplaceAll {
-            ui.show_step(6, total_steps, "S3 region")?;
-            let Some(value) = ui.ask_text("S3 region", region.as_deref())? else {
-                return Ok(None);
-            };
-            region = Some(value);
         }
 
         match S3Config::new(
+            name.clone().unwrap_or_default(),
             access_key.clone().unwrap_or_default(),
             secret_key.clone().unwrap_or_default(),
             bucket.clone().unwrap_or_default(),
-            base_path.clone().unwrap_or_default(),
             endpoint.clone().unwrap_or_default(),
             region.clone().unwrap_or_default(),
         ) {
-            Ok(config) => {
-                store.save_s3(&config)?;
-                return Ok(Some(config));
-            }
+            Ok(config) => match store.add_s3_profile(&config) {
+                Ok(()) => return Ok(Some(config)),
+                Err(error @ ConfigError::DuplicateS3Name { .. }) => {
+                    ui.show_message(MessageLevel::Error, &error.to_string())?;
+                    name = None;
+                }
+                Err(error) => return Err(error.into()),
+            },
             Err(error) => {
                 ui.show_message(MessageLevel::Error, &error.to_string())?;
                 // Recollect the complete profile after a validation failure. This avoids
                 // retaining a partially invalid value and keeps the prompt policy predictable
-                // for both the normal workflow and the explicit config command.
+                // for both the normal workflow bootstrap and `storage add`.
+                name = None;
                 access_key = None;
                 secret_key = None;
                 bucket = None;
-                base_path = None;
                 endpoint = None;
                 region = None;
             }
@@ -753,39 +729,14 @@ fn required_s3_value(value: String, missing: ConfigError) -> Result<String, Conf
     }
 }
 
-fn normalize_s3_base_path(value: &str) -> Result<String, ConfigError> {
-    let value = value.trim();
-    if value.starts_with('/')
-        || value.contains('\\')
-        || value
-            .chars()
-            .any(|character| character.is_control() || character == '\0')
-    {
-        return Err(ConfigError::InvalidS3BasePath);
-    }
-
-    let mut components = Vec::new();
-    for component in value.split('/') {
-        if component.is_empty() {
-            continue;
-        }
-        if component == "." || component == ".." {
-            return Err(ConfigError::InvalidS3BasePath);
-        }
-        components.push(component);
-    }
-
-    Ok(components.join("/"))
-}
-
 #[derive(Clone, Default, Deserialize, Serialize)]
 struct StartupConfigValues {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tmdb_api_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tmdb_language: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    s3: Option<StoredS3Config>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    s3: Vec<StoredS3Config>,
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -794,8 +745,12 @@ struct StoredConfig {
     tmdb_api_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tmdb_language: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    s3: Option<StoredS3Config>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_s3_profiles",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    s3: Vec<StoredS3Config>,
 }
 
 impl StoredConfig {
@@ -826,22 +781,30 @@ impl StoredConfig {
             .unwrap_or_else(|| DEFAULT_TMDB_LANGUAGE.to_owned())
     }
 
-    fn s3_config(&self) -> Option<S3Config> {
-        let stored = self.s3.as_ref()?;
-        S3Config::new(
-            stored.access_key.clone()?,
-            stored.secret_key.clone()?,
-            stored.bucket.clone()?,
-            stored.base_path.clone().unwrap_or_default(),
-            stored.endpoint.clone().unwrap_or_default(),
-            stored.region.clone()?,
-        )
-        .ok()
+    fn s3_profiles(&self) -> Vec<S3Config> {
+        self.s3
+            .iter()
+            .filter_map(|stored| {
+                let bucket = stored.bucket.clone()?;
+                let name = stored.name.clone().unwrap_or_else(|| bucket.clone());
+                S3Config::new(
+                    name,
+                    stored.access_key.clone()?,
+                    stored.secret_key.clone()?,
+                    bucket,
+                    stored.endpoint.clone().unwrap_or_default(),
+                    stored.region.clone()?,
+                )
+                .ok()
+            })
+            .collect()
     }
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
 struct StoredS3Config {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     access_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -849,23 +812,45 @@ struct StoredS3Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     bucket: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    base_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     endpoint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     region: Option<String>,
 }
 
 impl StoredS3Config {
+    fn logical_name(&self) -> Option<&str> {
+        self.name.as_deref().or(self.bucket.as_deref())
+    }
+
     fn from_config(config: &S3Config) -> Self {
         Self {
+            name: Some(config.name.clone()),
             access_key: Some(config.access_key.clone()),
             secret_key: Some(config.secret_key.clone()),
             bucket: Some(config.bucket.clone()),
-            base_path: Some(config.base_path.clone()),
             endpoint: Some(config.endpoint.clone()),
             region: Some(config.region.clone()),
         }
+    }
+}
+
+fn deserialize_s3_profiles<'de, D>(deserializer: D) -> Result<Vec<StoredS3Config>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Null => Ok(Vec::new()),
+        serde_json::Value::Array(value) => serde_json::from_value(serde_json::Value::Array(value))
+            .map_err(serde::de::Error::custom),
+        serde_json::Value::Object(value) => {
+            serde_json::from_value(serde_json::Value::Object(value))
+                .map(|profile| vec![profile])
+                .map_err(serde::de::Error::custom)
+        }
+        _ => Err(serde::de::Error::custom(
+            "the s3 configuration must be an object or an array",
+        )),
     }
 }
 
@@ -954,23 +939,23 @@ mod tests {
         );
         let tmdb = StartupConfig::new("tmdb-secret".to_owned(), "en-US".to_owned()).unwrap();
         let s3 = S3Config::new(
+            "primary".to_owned(),
             "access".to_owned(),
             "secret".to_owned(),
             "bucket".to_owned(),
-            "media/library/".to_owned(),
             "https://s3.example.test".to_owned(),
             "us-east-1".to_owned(),
         )
         .unwrap();
 
         store.save(&tmdb).unwrap();
-        store.save_s3(&s3).unwrap();
+        store.add_s3_profile(&s3).unwrap();
 
-        let loaded = store.load_s3().unwrap().unwrap();
+        let loaded = store.load_s3_profiles().unwrap().pop().unwrap();
+        assert_eq!(loaded.name(), "primary");
         assert_eq!(loaded.access_key(), "access");
         assert_eq!(loaded.secret_key(), "secret");
         assert_eq!(loaded.bucket(), "bucket");
-        assert_eq!(loaded.base_path(), "media/library");
         assert_eq!(loaded.endpoint(), "https://s3.example.test");
         assert_eq!(loaded.region(), "us-east-1");
         let stored = store.load().unwrap();
@@ -979,12 +964,64 @@ mod tests {
     }
 
     #[test]
+    fn s3_catalog_supports_multiple_buckets_and_removes_only_the_requested_bucket() {
+        let directory = tempdir().unwrap();
+        let store = ConfigStore::from_path(
+            directory
+                .path()
+                .join(CONFIG_DIRECTORY_NAME)
+                .join(CONFIG_FILE_NAME),
+        );
+        let first = S3Config::new(
+            "primary".to_owned(),
+            "access-one".to_owned(),
+            "secret-one".to_owned(),
+            "bucket-one".to_owned(),
+            String::new(),
+            "us-east-1".to_owned(),
+        )
+        .unwrap();
+        let second = S3Config::new(
+            "archive".to_owned(),
+            "access-two".to_owned(),
+            "secret-two".to_owned(),
+            "bucket-two".to_owned(),
+            "https://s3.example.test".to_owned(),
+            "eu-west-1".to_owned(),
+        )
+        .unwrap();
+
+        store.add_s3_profile(&first).unwrap();
+        store.add_s3_profile(&second).unwrap();
+
+        let contents = fs::read_to_string(store.path()).unwrap();
+        assert!(contents.contains("\"s3\": ["));
+        assert!(!contents.contains("base_path"));
+
+        let profiles = store.load_s3_profiles().unwrap();
+        assert_eq!(profiles.len(), 2);
+        assert_eq!(profiles[0].name(), "primary");
+        assert_eq!(profiles[1].name(), "archive");
+
+        assert!(matches!(
+            store.add_s3_profile(&first),
+            Err(ConfigError::DuplicateS3Name { .. })
+        ));
+        assert!(store.remove_s3_profile("PRIMARY").unwrap());
+        assert!(!store.remove_s3_profile("missing").unwrap());
+
+        let remaining = store.load_s3_profiles().unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].name(), "archive");
+    }
+
+    #[test]
     fn s3_configuration_debug_output_redacts_credentials() {
         let config = S3Config::new(
+            "primary".to_owned(),
             "access-secret".to_owned(),
             "secret-value".to_owned(),
             "bucket".to_owned(),
-            "media".to_owned(),
             "https://s3.example.test".to_owned(),
             "us-east-1".to_owned(),
         )
@@ -1002,10 +1039,21 @@ mod tests {
     fn invalid_s3_profile_values_are_rejected_at_the_configuration_boundary() {
         assert!(matches!(
             S3Config::new(
+                "profile\nname".to_owned(),
+                "access".to_owned(),
+                "secret".to_owned(),
+                "bucket".to_owned(),
+                "https://s3.example.test".to_owned(),
+                "us-east-1".to_owned(),
+            ),
+            Err(ConfigError::InvalidS3Name)
+        ));
+        assert!(matches!(
+            S3Config::new(
+                "profile".to_owned(),
                 "access".to_owned(),
                 "secret".to_owned(),
                 "bucket/name".to_owned(),
-                String::new(),
                 "https://s3.example.test".to_owned(),
                 "us-east-1".to_owned(),
             ),
@@ -1013,21 +1061,10 @@ mod tests {
         ));
         assert!(matches!(
             S3Config::new(
+                "profile".to_owned(),
                 "access".to_owned(),
                 "secret".to_owned(),
                 "bucket".to_owned(),
-                "media/../library".to_owned(),
-                "https://s3.example.test".to_owned(),
-                "us-east-1".to_owned(),
-            ),
-            Err(ConfigError::InvalidS3BasePath)
-        ));
-        assert!(matches!(
-            S3Config::new(
-                "access".to_owned(),
-                "secret".to_owned(),
-                "bucket".to_owned(),
-                String::new(),
                 "file:///tmp/s3".to_owned(),
                 "us-east-1".to_owned(),
             ),
@@ -1035,32 +1072,10 @@ mod tests {
         ));
         assert!(matches!(
             S3Config::new(
+                "profile".to_owned(),
                 "access".to_owned(),
                 "secret".to_owned(),
                 "bucket".to_owned(),
-                "/absolute".to_owned(),
-                "https://s3.example.com".to_owned(),
-                "us-east-1".to_owned(),
-            ),
-            Err(ConfigError::InvalidS3BasePath)
-        ));
-        assert!(matches!(
-            S3Config::new(
-                "access".to_owned(),
-                "secret".to_owned(),
-                "bucket".to_owned(),
-                "media\\archive".to_owned(),
-                "https://s3.example.com".to_owned(),
-                "us-east-1".to_owned(),
-            ),
-            Err(ConfigError::InvalidS3BasePath)
-        ));
-        assert!(matches!(
-            S3Config::new(
-                "access".to_owned(),
-                "secret".to_owned(),
-                "bucket".to_owned(),
-                String::new(),
                 "https://user:secret@s3.example.com".to_owned(),
                 "us-east-1".to_owned(),
             ),
@@ -1071,10 +1086,10 @@ mod tests {
     #[test]
     fn blank_s3_endpoint_uses_the_standard_aws_endpoint() {
         let config = S3Config::new(
+            "profile".to_owned(),
             "access".to_owned(),
             "secret".to_owned(),
             "bucket".to_owned(),
-            String::new(),
             "   ".to_owned(),
             "us-east-1".to_owned(),
         )
@@ -1100,15 +1115,16 @@ mod tests {
     "access_key": "access",
     "secret_key": "secret",
     "bucket": "bucket",
-    "base_path": "media",
+    "base_path": "legacy/media",
     "region": "us-east-1"
   }
 }"#,
         )
         .unwrap();
 
-        let config = store.load_s3().unwrap().unwrap();
+        let config = store.load_s3_profiles().unwrap().pop().unwrap();
 
+        assert_eq!(config.name(), "bucket");
         assert_eq!(config.endpoint(), DEFAULT_S3_ENDPOINT);
     }
 

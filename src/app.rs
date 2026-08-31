@@ -5,8 +5,8 @@ use std::{
 
 use crate::{
     config::{
-        ConfigPromptMode, ConfigStore, S3Config, S3ConfigPromptMode, StartupConfig,
-        configure_interactively, configure_s3_interactively,
+        ConfigPromptMode, ConfigStore, S3Config, StartupConfig, configure_interactively,
+        configure_s3_interactively,
     },
     domain::{
         EpisodeRef, FileOperation, FilesystemSelection, IdentificationMethod, OperationPlan,
@@ -123,28 +123,72 @@ where
         return Ok(RunOutcome::Cancelled);
     };
 
-    let s3_config = if source_kind == StorageKind::S3 || destination_kind == StorageKind::S3 {
-        let Some(config) = configure_s3_interactively(ui, store, S3ConfigPromptMode::MissingOnly)?
-        else {
-            ui.show_message(MessageLevel::Info, "S3 configuration canceled.")?;
+    let s3_profiles = if source_kind == StorageKind::S3 || destination_kind == StorageKind::S3 {
+        let Some(profiles) = ensure_s3_profiles(ui, store)? else {
             return Ok(RunOutcome::Cancelled);
         };
-        ui.show_message(MessageLevel::Success, "S3 configuration is ready.")?;
-        Some(config)
+        profiles
+    } else {
+        Vec::new()
+    };
+
+    let source_profile = if source_kind == StorageKind::S3 {
+        let Some(profile) = choose_s3_profile(ui, StorageRole::Source, &s3_profiles)? else {
+            ui.show_message(MessageLevel::Info, "S3 source selection canceled.")?;
+            return Ok(RunOutcome::Cancelled);
+        };
+        Some(profile)
     } else {
         None
     };
-    let source_backend = build_storage_backend(source_kind, s3_config.as_ref())?;
-    let destination_backend = build_storage_backend(destination_kind, s3_config.as_ref())?;
+    let destination_profile = if destination_kind == StorageKind::S3 {
+        let Some(profile) = choose_s3_profile(ui, StorageRole::Destination, &s3_profiles)? else {
+            ui.show_message(MessageLevel::Info, "S3 destination selection canceled.")?;
+            return Ok(RunOutcome::Cancelled);
+        };
+        Some(profile)
+    } else {
+        None
+    };
+
+    ui.show_step(3, 8, "Configure selected storage")?;
+    let source_backend = if source_kind == StorageKind::S3 {
+        let profile = source_profile
+            .as_ref()
+            .ok_or(ConfigError::MissingS3AccessKey)?;
+        loop {
+            let Some(prefix) = ui.ask_storage_source_prefix()? else {
+                ui.show_message(MessageLevel::Info, "S3 source selection canceled.")?;
+                return Ok(RunOutcome::Cancelled);
+            };
+            match build_storage_backend(source_kind, Some(profile), Some(&prefix)) {
+                Ok(backend) => break backend,
+                Err(error) => {
+                    ui.show_message(MessageLevel::Error, &error.to_string())?;
+                    let Some(retry) = ui.confirm("Choose the S3 source prefix again?", true)?
+                    else {
+                        return Ok(RunOutcome::Cancelled);
+                    };
+                    if !retry {
+                        return Ok(RunOutcome::Cancelled);
+                    }
+                }
+            }
+        }
+    } else {
+        build_storage_backend(source_kind, None, None)?
+    };
+    let destination_backend =
+        build_storage_backend(destination_kind, destination_profile.as_ref(), None)?;
 
     loop {
-        ui.show_step(3, 8, "Choose copy or move")?;
+        ui.show_step(4, 8, "Choose copy or move")?;
         let Some(operation) = ui.choose_file_operation()? else {
             ui.show_message(MessageLevel::Info, "Storage selection canceled.")?;
             return Ok(RunOutcome::Cancelled);
         };
 
-        ui.show_step(4, 8, "Choose destination")?;
+        ui.show_step(5, 8, "Choose destination")?;
         let Some(selection) = collect_storage_selection(
             ui,
             source_backend.as_ref(),
@@ -203,6 +247,99 @@ pub fn run_config_with_store<U: InteractiveUi>(
     })
 }
 
+/// Runs `storage add`, which collects and persists one named S3 bucket without touching TMDB
+/// settings or starting the media workflow.
+pub fn run_storage_add<U: InteractiveUi>(ui: &mut U, version: &str) -> AppResult<RunOutcome> {
+    let store = ConfigStore::for_current_user()?;
+    run_storage_add_with_store(ui, version, &store)
+}
+
+/// Runs `storage add` with an explicit store for isolated tests.
+pub fn run_storage_add_with_store<U: InteractiveUi>(
+    ui: &mut U,
+    version: &str,
+    store: &ConfigStore,
+) -> AppResult<RunOutcome> {
+    ui.show_welcome(version)?;
+    ui.show_step(1, 1, "Add an S3 bucket")?;
+    let Some(profile) = configure_s3_interactively(ui, store)? else {
+        ui.show_message(MessageLevel::Info, "S3 bucket creation canceled.")?;
+        return Ok(RunOutcome::Cancelled);
+    };
+    ui.show_message(
+        MessageLevel::Success,
+        &format!("S3 bucket `{}` was added.", profile.name()),
+    )?;
+    ui.show_message(
+        MessageLevel::Info,
+        &format!("Configuration file: {}", store.path().display()),
+    )?;
+    Ok(RunOutcome::StorageUpdated)
+}
+
+/// Runs `storage remove`, allowing the user to choose and confirm one saved S3 bucket.
+pub fn run_storage_remove<U: InteractiveUi>(ui: &mut U, version: &str) -> AppResult<RunOutcome> {
+    let store = ConfigStore::for_current_user()?;
+    run_storage_remove_with_store(ui, version, &store)
+}
+
+/// Runs `storage remove` with an explicit store for isolated tests.
+pub fn run_storage_remove_with_store<U: InteractiveUi>(
+    ui: &mut U,
+    version: &str,
+    store: &ConfigStore,
+) -> AppResult<RunOutcome> {
+    ui.show_welcome(version)?;
+    let profiles = store.load_s3_profiles()?;
+    if profiles.is_empty() {
+        ui.show_message(MessageLevel::Info, "No saved S3 buckets were found.")?;
+        return Ok(RunOutcome::StorageUpdated);
+    }
+
+    let labels = profiles
+        .iter()
+        .map(S3Config::display_label)
+        .collect::<Vec<_>>();
+    let Some(index) = ui.select_one("Select the S3 bucket to remove", &labels, true)? else {
+        ui.show_message(MessageLevel::Info, "S3 bucket removal canceled.")?;
+        return Ok(RunOutcome::Cancelled);
+    };
+    let profile = profiles.get(index).ok_or(UiError::InvalidSelection {
+        context: "S3 bucket",
+    })?;
+    let Some(confirmed) = ui.confirm(
+        &format!(
+            "Remove S3 bucket `{}` from the saved catalog?",
+            profile.name()
+        ),
+        false,
+    )?
+    else {
+        ui.show_message(MessageLevel::Info, "S3 bucket removal canceled.")?;
+        return Ok(RunOutcome::Cancelled);
+    };
+    if !confirmed {
+        ui.show_message(MessageLevel::Info, "S3 bucket removal canceled.")?;
+        return Ok(RunOutcome::Cancelled);
+    }
+
+    if !store.remove_s3_profile(profile.name())? {
+        return Err(ConfigError::S3ProfileNotFound {
+            name: profile.name().to_owned(),
+        }
+        .into());
+    }
+    ui.show_message(
+        MessageLevel::Success,
+        &format!("S3 bucket `{}` was removed.", profile.name()),
+    )?;
+    ui.show_message(
+        MessageLevel::Info,
+        &format!("Configuration file: {}", store.path().display()),
+    )?;
+    Ok(RunOutcome::StorageUpdated)
+}
+
 fn run_config_with_store_and_validator<U, F>(
     ui: &mut U,
     version: &str,
@@ -223,20 +360,6 @@ where
     };
 
     ui.show_message(MessageLevel::Success, "TMDB configuration saved.")?;
-    let has_s3_configuration = store.load_s3()?.is_some();
-    if ui.confirm_s3_configuration_update(has_s3_configuration)? == Some(true) {
-        let Some(_s3_config) =
-            configure_s3_interactively(ui, store, S3ConfigPromptMode::ReplaceAll)?
-        else {
-            ui.show_message(MessageLevel::Info, "S3 configuration update canceled.")?;
-            ui.show_message(
-                MessageLevel::Info,
-                &format!("Configuration file: {}", store.path().display()),
-            )?;
-            return Ok(RunOutcome::ConfigurationUpdated);
-        };
-        ui.show_message(MessageLevel::Success, "S3 configuration saved.")?;
-    }
     ui.show_message(
         MessageLevel::Info,
         &format!("Configuration file: {}", store.path().display()),
@@ -291,15 +414,72 @@ where
     }
 }
 
+fn ensure_s3_profiles<U: InteractiveUi>(
+    ui: &mut U,
+    store: &ConfigStore,
+) -> AppResult<Option<Vec<S3Config>>> {
+    let profiles = store.load_s3_profiles()?;
+    if !profiles.is_empty() {
+        return Ok(Some(profiles));
+    }
+
+    ui.show_message(
+        MessageLevel::Warning,
+        "No S3 buckets are configured. Add at least one bucket now to use S3 storage.",
+    )?;
+    let Some(profile) = configure_s3_interactively(ui, store)? else {
+        ui.show_message(MessageLevel::Info, "S3 bucket creation canceled.")?;
+        return Ok(None);
+    };
+    ui.show_message(
+        MessageLevel::Success,
+        &format!("S3 bucket `{}` is ready.", profile.name()),
+    )?;
+    Ok(Some(vec![profile]))
+}
+
+fn choose_s3_profile<U: InteractiveUi>(
+    ui: &mut U,
+    role: StorageRole,
+    profiles: &[S3Config],
+) -> AppResult<Option<S3Config>> {
+    if profiles.is_empty() {
+        return Err(ConfigError::MissingS3AccessKey.into());
+    }
+    if profiles.len() == 1 {
+        return Ok(profiles.first().cloned());
+    }
+
+    let labels = profiles
+        .iter()
+        .map(S3Config::display_label)
+        .collect::<Vec<_>>();
+    let Some(index) = ui.choose_s3_profile(role, &labels)? else {
+        return Ok(None);
+    };
+    profiles
+        .get(index)
+        .cloned()
+        .ok_or(UiError::InvalidSelection {
+            context: "S3 bucket",
+        })
+        .map(Some)
+        .map_err(AppError::from)
+}
+
 fn build_storage_backend(
     kind: StorageKind,
     s3_config: Option<&S3Config>,
+    prefix: Option<&str>,
 ) -> AppResult<Box<dyn StorageBackend>> {
     match kind {
         StorageKind::Local => Ok(Box::new(LocalStorage::new())),
         StorageKind::S3 => {
             let config = s3_config.ok_or(ConfigError::MissingS3AccessKey)?;
-            Ok(Box::new(S3Storage::new(config)?))
+            Ok(Box::new(S3Storage::with_prefix(
+                config,
+                prefix.unwrap_or_default(),
+            )?))
         }
     }
 }
@@ -316,7 +496,7 @@ fn collect_storage_selection<U: InteractiveUi>(
         return Ok(None);
     };
     let destination = destination_backend.resolve_destination(&source_root, &destination_input)?;
-    destination_backend.validate_destination(&source_root, &destination)?;
+    destination_backend.validate_destination(source_backend, &source_root, &destination)?;
 
     if !destination.exists() && destination.may_create_after_confirmation() {
         let destination_root = destination_backend
@@ -328,7 +508,10 @@ fn collect_storage_selection<U: InteractiveUi>(
         }
     }
 
-    let discovery = source_backend.discover_videos(&source_root, Some(destination.path()))?;
+    let excluded_destination = source_backend
+        .same_namespace(destination_backend)
+        .then_some(destination.path());
+    let discovery = source_backend.discover_videos(&source_root, excluded_destination)?;
     for warning in discovery.warnings() {
         ui.show_message(
             MessageLevel::Warning,
@@ -1266,7 +1449,10 @@ mod tests {
         destination_input: Option<String>,
         file_operations: Vec<Option<FileOperation>>,
         select_many_responses: Vec<Option<Vec<usize>>>,
+        select_one_responses: Vec<Option<usize>>,
         confirm_responses: Vec<Option<bool>>,
+        storage_text_responses: Vec<String>,
+        storage_secret_response: Option<String>,
         identification_methods: Vec<Option<IdentificationMethod>>,
         media_types: Vec<Option<MediaType>>,
         search_queries: Vec<Option<String>>,
@@ -1320,6 +1506,9 @@ mod tests {
             _default: Option<&str>,
         ) -> UiResult<Option<String>> {
             self.events.push(format!("secret:{prompt}"));
+            if prompt.starts_with("S3 ") {
+                return Ok(self.storage_secret_response.take());
+            }
             if self.cancel_on_secret {
                 Ok(None)
             } else {
@@ -1331,6 +1520,13 @@ mod tests {
             self.events.push(format!("text:{prompt}"));
             if prompt == "Destination folder path" {
                 return Ok(self.destination_input.clone());
+            }
+            if prompt.starts_with("S3 ") {
+                return Ok(if self.storage_text_responses.is_empty() {
+                    None
+                } else {
+                    Some(self.storage_text_responses.remove(0))
+                });
             }
             if self.cancel_on_language {
                 Ok(None)
@@ -1345,7 +1541,11 @@ mod tests {
             _items: &[String],
             _searchable: bool,
         ) -> UiResult<Option<usize>> {
-            Ok(None)
+            if self.select_one_responses.is_empty() {
+                Ok(None)
+            } else {
+                Ok(self.select_one_responses.remove(0))
+            }
         }
 
         fn select_many(
@@ -2244,6 +2444,76 @@ mod tests {
                 .iter()
                 .any(|event| event == "text:TMDB metadata language")
         );
+    }
+
+    #[test]
+    fn storage_add_command_persists_one_named_bucket_without_starting_tmdb_configuration() {
+        let directory = tempdir().unwrap();
+        let store = ConfigStore::from_path(directory.path().join("config.json"));
+        let mut ui = RecordingUi {
+            storage_text_responses: vec![
+                "primary".to_owned(),
+                "access-key".to_owned(),
+                "bucket-one".to_owned(),
+                String::new(),
+                "us-east-1".to_owned(),
+            ],
+            storage_secret_response: Some("secret-key".to_owned()),
+            ..RecordingUi::default()
+        };
+
+        let outcome = run_storage_add_with_store(&mut ui, "0.1.0", &store).unwrap();
+
+        assert_eq!(outcome, RunOutcome::StorageUpdated);
+        let profiles = store.load_s3_profiles().unwrap();
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].name(), "primary");
+        assert_eq!(profiles[0].bucket(), "bucket-one");
+        assert_eq!(profiles[0].endpoint(), crate::config::DEFAULT_S3_ENDPOINT);
+        assert!(
+            !ui.events
+                .iter()
+                .any(|event| event.starts_with("secret:TMDB"))
+        );
+    }
+
+    #[test]
+    fn storage_remove_command_removes_only_the_confirmed_bucket() {
+        let directory = tempdir().unwrap();
+        let store = ConfigStore::from_path(directory.path().join("config.json"));
+        let first = S3Config::new(
+            "primary".to_owned(),
+            "access-one".to_owned(),
+            "secret-one".to_owned(),
+            "bucket-one".to_owned(),
+            String::new(),
+            "us-east-1".to_owned(),
+        )
+        .unwrap();
+        let second = S3Config::new(
+            "archive".to_owned(),
+            "access-two".to_owned(),
+            "secret-two".to_owned(),
+            "bucket-two".to_owned(),
+            String::new(),
+            "us-east-1".to_owned(),
+        )
+        .unwrap();
+        store.add_s3_profile(&first).unwrap();
+        store.add_s3_profile(&second).unwrap();
+
+        let mut ui = RecordingUi {
+            select_one_responses: vec![Some(0)],
+            confirm_responses: vec![Some(true)],
+            ..RecordingUi::default()
+        };
+
+        let outcome = run_storage_remove_with_store(&mut ui, "0.1.0", &store).unwrap();
+
+        assert_eq!(outcome, RunOutcome::StorageUpdated);
+        let profiles = store.load_s3_profiles().unwrap();
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].name(), "archive");
     }
 
     #[test]

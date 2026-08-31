@@ -73,13 +73,29 @@ pub trait InteractiveUi {
         }
     }
 
+    /// Selects one saved S3 bucket for a source or destination role.
+    fn choose_s3_profile(
+        &mut self,
+        role: StorageRole,
+        profiles: &[String],
+    ) -> UiResult<Option<usize>> {
+        let prompt = match role {
+            StorageRole::Source => "Which S3 bucket contains the source files?",
+            StorageRole::Destination => "Which S3 bucket should receive the organized files?",
+        };
+        self.select_one(prompt, profiles, true)
+    }
+
+    /// Asks for the per-run S3 source prefix. The empty value means the bucket root.
+    fn ask_storage_source_prefix(&mut self) -> UiResult<Option<String>> {
+        self.ask_text("S3 source prefix (optional; empty = bucket root)", Some(""))
+    }
+
     /// Asks for a backend-specific destination path or object prefix.
     fn ask_storage_destination_path(&mut self, kind: StorageKind) -> UiResult<Option<String>> {
         let prompt = match kind {
             StorageKind::Local => "Local destination folder path",
-            StorageKind::S3 => {
-                "S3 destination prefix (relative to the configured base path; empty = base path)"
-            }
+            StorageKind::S3 => "S3 destination prefix (optional; empty = bucket root)",
         };
         self.ask_text(prompt, None)
     }
@@ -163,17 +179,6 @@ pub trait InteractiveUi {
                 report.pending_count()
             ),
         )
-    }
-
-    /// Decides whether the explicit config command should reopen the S3 profile.
-    ///
-    /// The default keeps existing test and non-terminal adapters compatible. A concrete terminal
-    /// UI should ask the user explicitly.
-    fn confirm_s3_configuration_update(
-        &mut self,
-        _has_existing_configuration: bool,
-    ) -> UiResult<Option<bool>> {
-        Ok(Some(false))
     }
 
     /// Shows the active file line before its metadata prompts.
