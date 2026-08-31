@@ -1,6 +1,6 @@
 use std::{io, time::Duration};
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use dialoguer::{Confirm, Input, MultiSelect, Password, Select, theme::ColorfulTheme};
 use indicatif::{ProgressBar, ProgressStyle};
 
@@ -20,18 +20,33 @@ const MULTI_SELECT_SEARCH_THRESHOLD: usize = 10;
     version,
     about = "Organize MKV videos with verified TMDB metadata.",
     long_about = "A polished interactive CLI for selecting MKV videos, identifying movies or TV series in TMDB, and preparing safe metadata-bearing filenames.",
-    after_help = "Examples:\n  title-tmdb-file\n  title-tmdb-file --help\n  title-tmdb-file --version"
+    after_help = "Examples:\n  title-tmdb-file\n  title-tmdb-file config\n  title-tmdb-file --help\n  title-tmdb-file --version"
 )]
-pub struct Cli;
+pub struct Cli {
+    /// Optional explicit command. Omitting it starts the organization wizard.
+    #[command(subcommand)]
+    pub command: Option<CliCommand>,
+}
 
-/// Executes the default command after `clap` has parsed it.
-pub fn execute(_cli: Cli) -> AppResult<RunOutcome> {
+/// Explicit commands exposed by the clap boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Subcommand)]
+pub enum CliCommand {
+    /// Create or update the saved TMDB API key and metadata language.
+    #[command(about = "Create or update the saved TMDB configuration.")]
+    Config,
+}
+
+/// Executes the selected command after `clap` has parsed it.
+pub fn execute(cli: Cli) -> AppResult<RunOutcome> {
     let mut ui = TerminalUi::new();
     if !ui.is_interactive() {
         return Err(AppError::NonInteractive);
     }
 
-    app::run(&mut ui, env!("CARGO_PKG_VERSION"))
+    match cli.command {
+        Some(CliCommand::Config) => app::run_config(&mut ui, env!("CARGO_PKG_VERSION")),
+        None => app::run(&mut ui, env!("CARGO_PKG_VERSION")),
+    }
 }
 
 /// The concrete terminal adapter used by the interactive wizard.
@@ -324,7 +339,14 @@ mod tests {
     #[test]
     fn default_invocation_parses_without_arguments() {
         let parsed = Cli::try_parse_from(["title-tmdb-file"]).unwrap();
-        assert_eq!(parsed, Cli);
+        assert_eq!(parsed.command, None);
+    }
+
+    #[test]
+    fn config_subcommand_is_owned_by_clap() {
+        let parsed = Cli::try_parse_from(["title-tmdb-file", "config"]).unwrap();
+
+        assert_eq!(parsed.command, Some(CliCommand::Config));
     }
 
     #[test]
@@ -334,6 +356,7 @@ mod tests {
         assert_eq!(error.kind(), ErrorKind::DisplayHelp);
         assert!(error.to_string().contains("A polished interactive CLI"));
         assert!(error.to_string().contains("Examples:"));
+        assert!(error.to_string().contains("config"));
     }
 
     #[test]

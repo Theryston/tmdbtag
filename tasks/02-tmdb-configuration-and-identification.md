@@ -1,6 +1,6 @@
 # Task 02 — TMDB Configuration and Identification
 
-**Status:** Not started
+**Status:** In progress — per-user configuration persistence and the shared configuration wizard are implemented; TMDB verification and identification remain.
 **Priority:** P0
 **Dependencies:** Task 01
 **Blocks:** Task 05
@@ -15,23 +15,33 @@ The TMDB API is the authority for the identifier, media type, and title. A user-
 
 During every normal interactive run, after `clap` has handled the command line and before the application asks for the destination or discovers source folders:
 
-1. ask for the TMDB API key with masked input;
-2. ask for the TMDB metadata language;
-3. validate the configuration;
-4. continue only after both values are accepted or the user explicitly cancels.
+1. resolve `~/.title-tmdb-file/config.json` in the current user's home directory;
+2. load the optional `tmdb_api_key` and `tmdb_language` fields;
+3. ask only for missing or invalid fields, using masked input for the API key;
+4. save a complete configuration after local validation;
+5. validate the configuration with TMDB;
+6. continue only after the configuration is accepted or the user explicitly cancels.
 
-The user may use `TMDB_API_KEY` and `TMDB_LANGUAGE` as convenient defaults, but their presence must not silently remove either prompt. The initial language default is `pt-BR`. All app-owned prompts, diagnostics, and status text remain in English.
+When both fields are missing, the API-key prompt comes first and the language prompt comes second.
+When both fields are valid, neither prompt is shown. The `title-tmdb-file config` command always
+reopens both fields and uses the same prompt, validation, and persistence implementation. The user
+may use `TMDB_API_KEY` and `TMDB_LANGUAGE` as fallback defaults for missing fields, but their presence
+must not silently remove a required prompt. The initial language default is `pt-BR`. All app-owned
+prompts, diagnostics, and status text remain in English.
 
 ## Scope
 
 ### 1. Credential and language configuration
 
 - Define a typed startup configuration containing the API key and selected metadata language.
-- Read `TMDB_API_KEY` only as an optional masked default for the first prompt.
-- Read `TMDB_LANGUAGE` only as an optional default for the second prompt.
-- Always show both prompts during a normal interactive run, even when environment defaults are present.
-- Never echo the API key, include it in debug output, put it in a preview, write it into a filename, or persist it in a project file.
-- Keep the key in memory for the current execution only unless a future product decision introduces an explicitly documented secret store.
+- Define a storage boundary for `~/.title-tmdb-file/config.json` with optional fields so missing values can be detected.
+- Read an existing saved API key as a masked default and an existing saved language as an editable default.
+- Read `TMDB_API_KEY` and `TMDB_LANGUAGE` only as fallback defaults when the corresponding saved field is unavailable.
+- During the normal run, prompt only for missing or invalid fields; the `config` command must prompt for both.
+- Never echo the API key, include it in debug output, put it in a preview, or write it into a filename or operation plan.
+- Persist the accepted key only in the documented per-user configuration file, never in a project file or repository.
+- Keep the key in memory while the current execution uses it.
+- Use owner-only directory/file permissions where the host supports them (`0700`/`0600` on Unix-like systems).
 - Validate that the language is a supported TMDB language/locale format before making identification requests.
 - Validate the API key against TMDB before filesystem selection.
 - Let the user retry or cancel when validation fails.
@@ -161,8 +171,14 @@ Use mocked HTTP responses or a local test server. Tests must not depend on a rea
 
 Cover at least:
 
+- configuration-file round trips through the documented JSON schema;
+- missing configuration files and partially populated files;
+- complete saved configuration that skips both normal startup prompts;
+- partially saved configuration that prompts only for the missing field;
+- the `config` command reopening both fields through the shared wizard;
 - masked startup configuration through a fake UI;
-- environment defaults that still require the prompts;
+- environment defaults that still require a prompt when the saved field is absent;
+- file and directory permission behavior where supported;
 - API-key validation before filesystem discovery is invoked;
 - language propagation to requests;
 - movie search result mapping;
@@ -178,12 +194,19 @@ Cover at least:
 
 ## Acceptance checklist
 
-- [ ] The API-key prompt is the first normal interactive question after `clap` parsing.
-- [ ] API-key input is masked and never echoed.
-- [ ] The language prompt is the second normal interactive question.
-- [ ] `TMDB_API_KEY` and `TMDB_LANGUAGE` can provide defaults without bypassing prompts.
-- [ ] The initial language default is `pt-BR`.
-- [ ] Configuration is validated before destination or source-folder discovery.
+- [x] The normal workflow resolves the per-user configuration path after `clap` parsing.
+- [x] The documented JSON fields are `tmdb_api_key` and `tmdb_language`.
+- [x] A complete saved configuration skips both normal startup prompts.
+- [x] A partially saved configuration prompts only for missing or invalid fields.
+- [x] The `config` command reopens both fields and reuses the shared configuration code.
+- [x] API-key input is masked and never echoed by the terminal adapter.
+- [x] Saved configuration is written with owner-only file permissions where supported.
+- [ ] The API-key prompt is the first missing-field question after `clap` parsing.
+- [ ] API-key input is validated against TMDB before filesystem discovery.
+- [ ] The language prompt is the next missing-field question when both fields are missing.
+- [x] `TMDB_API_KEY` and `TMDB_LANGUAGE` provide fallback defaults without bypassing required prompts.
+- [x] The initial language default is `pt-BR`.
+- [ ] Configuration is validated against TMDB before destination or source-folder discovery.
 - [ ] One reusable TMDB client applies authentication, language, timeout, and error policy consistently.
 - [ ] Movie and TV searches happen in real time.
 - [ ] Search candidates are clearly typed and no result is selected silently.
@@ -191,5 +214,5 @@ Cover at least:
 - [ ] Details are fetched and confirmed before metadata enters the operation plan.
 - [ ] Series season/episode combinations can be validated through TMDB.
 - [ ] All application-owned text is English.
-- [ ] No credential appears in logs, errors, previews, filenames, or persistent state.
+- [ ] No credential appears in logs, errors, previews, filenames, plans, or persistent state outside the documented per-user configuration file.
 - [ ] Mocked tests cover success, failure, cancellation, and redaction paths.

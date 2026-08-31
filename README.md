@@ -2,7 +2,7 @@
 
 Modern, polished, and highly interactive CLI for organizing .mkv video files using the identifier and title registered in [The Movie Database (TMDB)](https://www.themoviedb.org/).
 
-> Status: MVP in progress. Task 01 (CLI foundation and interactive terminal shell) is implemented. TMDB integration, filesystem discovery, naming, planning, and file movement remain for the following tasks.
+> Status: MVP in progress. The CLI foundation and persisted startup-configuration foundation are implemented. TMDB verification, filesystem discovery, naming, planning, and file movement remain for the following tasks.
 
 This README is the source of truth for the expected behavior. Any implementation, flow change, or new feature must be compared against this document before it is incorporated.
 
@@ -34,8 +34,8 @@ The command-line contract must be implemented with clap. The normal workflow is 
 
 The program is run inside a folder that contains other folders with video files. It must:
 
-1. ask for the TMDB API key through a secure prompt;
-2. ask which language should be used for TMDB metadata;
+1. load the saved TMDB configuration from `~/.title-tmdb-file/config.json` on Unix-like systems, or the equivalent current user's home directory on Windows;
+2. ask only for missing or invalid TMDB configuration fields, using secure prompts;
 3. ask which folder will be used as the destination;
 4. list the folders found in the current directory;
 5. allow one or more folders to be selected;
@@ -59,7 +59,9 @@ The program must not alter the video contents. Its job is to organize: select, r
 - Multiple-folder selection.
 - Multiple .mkv-file selection.
 - Real-time online search in TMDB.
-- Startup prompts for the TMDB API key and metadata language.
+- Per-user persistence for the TMDB API key and metadata language in `~/.title-tmdb-file/config.json`.
+- Conditional startup prompts that ask only for missing or invalid saved fields.
+- A `config` command that deliberately reopens both configuration fields.
 - Manual identification by numeric TMDB ID.
 - Support for movies and TV series.
 - Manual season and episode input for each series file.
@@ -99,6 +101,7 @@ These items may be considered in the future, but they must not be implemented im
 | Series | A TMDB item of type tv. |
 | Episode | The combination of a season and episode number for a TV series. |
 | Plan | The final mapping between each source file and the name/path it will have in the destination. |
+| Configuration file | The per-user JSON file at `~/.title-tmdb-file/config.json` that stores the TMDB API key and metadata language. |
 
 ### Unit-of-work rule
 
@@ -118,10 +121,13 @@ The mandatory MVP flow is:
 Start and parse command-line arguments with clap
         |
         v
-Ask for TMDB API key
+Load ~/.title-tmdb-file/config.json
         |
         v
-Ask for TMDB metadata language
+Ask only for missing TMDB configuration fields
+        |
+        v
+Save any newly completed configuration
         |
         v
 Validate TMDB configuration
@@ -154,7 +160,7 @@ Move and rename the files
 Display the final summary
 ~~~
 
-The TMDB API key and language must be requested before filesystem discovery. The destination folder must then be requested before source folders are listed. This allows it to be excluded from the list when it is a subfolder of the current directory and prevents the destination itself from being selected as a source. clap must process --help and --version before the interactive wizard; those flags exit without asking for credentials or touching the filesystem.
+The saved TMDB configuration must be loaded before filesystem discovery. If the file is absent, or if either field is absent, empty, or invalid, the corresponding English prompt is shown and the completed values are saved. When both fields are valid in the file, the normal organization workflow does not prompt for them again. The destination folder must then be requested before source folders are listed. This allows it to be excluded from the list when it is a subfolder of the current directory and prevents the destination itself from being selected as a source. clap must process --help, --version, and command-level help before the interactive wizard; those paths exit without asking for credentials or touching the filesystem.
 
 ## Interface Contract
 
@@ -177,6 +183,15 @@ The default invocation must start the interactive workflow:
 title-tmdb-file
 ~~~
 
+The explicit configuration command must be available through the same clap parser:
+
+~~~bash
+title-tmdb-file config
+~~~
+
+`config` opens the shared TMDB configuration wizard, asks for both fields, and saves the result to
+the per-user configuration file. It must not start the media-selection workflow.
+
 The help and version paths must work without a TMDB API key, a network connection, or a readable media directory:
 
 ~~~bash
@@ -188,20 +203,42 @@ Do not parse arguments manually with std::env::args, string matching, or ad-hoc 
 
 ### 2. Startup configuration
 
-On a normal interactive run, the first two questions shown to the user must be:
+Before the normal workflow reaches the destination prompt or discovers any media, it must load the
+per-user configuration file:
 
-1. TMDB API key;
-2. TMDB metadata language.
+~~~text
+~/.title-tmdb-file/config.json
+~~~
 
-These prompts happen before the destination prompt, source-folder discovery, or video-file discovery.
+The home-directory portion is resolved using the host operating system's current-user convention.
+The supported JSON fields are:
+
+~~~json
+{
+  "tmdb_api_key": "your-tmdb-api-key",
+  "tmdb_language": "pt-BR"
+}
+~~~
+
+The normal workflow follows these rules:
+
+- if the file is missing, ask for the API key first and the metadata language second;
+- if only the API key is missing or invalid, ask only for the masked API-key field;
+- if only the language is missing or invalid, ask only for the language field;
+- if both saved fields are valid, do not show either startup prompt;
+- save a complete configuration after missing values have been accepted;
+- keep all application-owned prompts and messages in English.
+
+When both fields need to be collected, the API-key question is always first. The prompts happen
+before the destination prompt, source-folder discovery, or video-file discovery.
 
 Rules for the API-key prompt:
 
 - use a masked/password-style input;
 - never echo the key;
 - require a non-empty key;
-- keep the key in memory only for the current execution;
-- allow TMDB_API_KEY to provide a masked default, but still show the prompt and require confirmation;
+- use the saved key as the masked default when it exists;
+- use `TMDB_API_KEY` as a masked default only when the saved key is unavailable;
 - never display the key in a preview, error, debug representation, log, or report;
 - validate the key against TMDB before proceeding to filesystem selection;
 - allow retry or cancellation when the key is rejected.
@@ -210,10 +247,14 @@ Rules for the language prompt:
 
 - show a searchable list of common TMDB language/locale codes;
 - allow a supported code to be entered manually when needed;
-- use pt-BR as the initial default;
-- allow TMDB_LANGUAGE to provide a default, while still showing the language prompt;
+- use `pt-BR` as the initial default;
+- use the saved language before considering `TMDB_LANGUAGE` as a default;
 - validate or normalize the selected code before making the first metadata request;
 - keep the application UI in English regardless of the selected TMDB language.
+
+The `config` command always asks for both fields, even when the configuration file is complete.
+Existing values may be shown as editable defaults, and pressing Enter for the masked key may reuse
+the saved value. A canceled update must leave the existing file unchanged.
 
 The selected language affects metadata returned by TMDB, especially the title used in the generated filename. It does not translate the CLI itself.
 
@@ -588,14 +629,22 @@ Support for overwriting or automatic conflict resolution must be a future, expli
 
 ### Startup configuration and credentials
 
-The normal interactive run must ask for the TMDB API key before asking for the destination or discovering any folders. The API key prompt must be masked and must never echo the secret.
+The normal interactive run must load the TMDB API key and metadata language from the per-user
+configuration file before asking for the destination or discovering any folders. The API key prompt,
+when required, must be masked and must never echo the secret.
 
 The startup configuration sequence is:
 
-1. ask for the TMDB API key;
-2. ask for the TMDB metadata language;
-3. validate the key and language with TMDB;
-4. only then continue to destination and source-folder selection.
+1. resolve `~/.title-tmdb-file/config.json` in the current user's home directory;
+2. load the JSON file, treating a missing file as an empty configuration;
+3. ask only for missing or invalid fields, with the API key before the language when both are needed;
+4. save the complete configuration after successful local validation;
+5. validate the key and language with TMDB;
+6. only then continue to destination and source-folder selection.
+
+The `title-tmdb-file config` command deliberately skips the media workflow and reopens both fields so
+the user can replace the saved values. It uses the same prompt, validation, and persistence code as
+the normal startup path.
 
 The environment may provide defaults for convenience:
 
@@ -607,19 +656,32 @@ export TMDB_API_KEY="your-key"
 export TMDB_LANGUAGE="pt-BR"
 ~~~
 
-Environment values do not remove the prompts. They may be shown as masked defaults that the user can confirm or replace.
+Environment values are fallback defaults only when the corresponding saved field is unavailable.
+They do not bypass a required prompt. A complete saved configuration takes precedence over both
+environment variables during a normal run.
 
 Rules:
 
-- keep the API key in memory only for the current execution;
+- persist the API key only in the documented per-user configuration file after the user accepts it;
+- keep the API key in memory only while the current execution is using it;
 - never show it in a preview, error, debug representation, log, or report;
-- never place it in a filename or persistent application state;
+- never place it in a filename, operation plan, or any persistent state other than the documented configuration file;
 - validate the key before filesystem selection;
 - allow retry or cancellation when validation fails;
 - keep all API-key handling out of the domain and filename modules;
 - do not put credentials directly in Cargo.toml, the source code, or this README.
 
 The selected TMDB language must be chosen through an English prompt. It controls the language of metadata returned by TMDB, especially the title used in generated filenames; it does not translate the CLI.
+
+### Configuration file safety
+
+The configuration file contains the API key in JSON because the CLI must reuse it on later runs. The
+application should create the containing directory with owner-only permissions where the platform
+supports them and should create the file with owner read/write permissions (`0700` for the directory
+and `0600` for the file on Unix-like systems). The application must never print the file contents,
+include the key in diagnostics, or commit the file to the repository. A malformed file must stop the
+normal workflow with an actionable error; `title-tmdb-file config` may replace it after the user
+explicitly completes the configuration prompts.
 
 ### Planned endpoints
 
@@ -826,7 +888,7 @@ title-tmdb-file/
 │   ├── main.rs              # binary entry point and exit code
 │   ├── app.rs               # orchestration of the complete flow
 │   ├── cli.rs               # clap parser and terminal renderer
-│   ├── config.rs            # current directory, destination, and credentials
+│   ├── config.rs            # per-user JSON config, prompts, and local validation
 │   ├── domain.rs            # media, selection, and plan types
 │   ├── error.rs             # application errors
 │   ├── ui.rs                # renderer-neutral terminal interaction contracts
@@ -854,7 +916,7 @@ This is a suggested organization, not a requirement to create every file immedia
 - Rust compatible with the edition defined in Cargo.toml;
 - an interactive terminal;
 - an internet connection for TMDB queries;
-- an application credential configured for TMDB;
+- a TMDB API key configured through the first-run prompts or `title-tmdb-file config`;
 - read permissions for sources and write permissions for the destination.
 
 ### Development execution
@@ -863,13 +925,19 @@ This is a suggested organization, not a requirement to create every file immedia
 cargo run
 ~~~
 
+Open or update the saved TMDB configuration without starting media selection:
+
+~~~bash
+cargo run -- config
+~~~
+
 Optimized execution, once the binary is implemented:
 
 ~~~bash
 cargo run --release
 ~~~
 
-The MVP is interactive and does not require source path arguments: the current directory is used automatically. clap must still provide --help and --version. Non-interactive options such as --source, --destination, or --dry-run may be added only after a separate specification exists for them.
+The MVP is interactive and does not require source path arguments: the current directory is used automatically. The normal command reuses a complete configuration from `~/.title-tmdb-file/config.json`; use `config` when both saved values need to be edited. clap must still provide --help and --version. Non-interactive options such as --source, --destination, or --dry-run may be added only after a separate specification exists for them.
 
 The command-line help and version paths can be exercised during development with:
 
@@ -880,7 +948,16 @@ cargo run -- --version
 
 ### Secrets
 
-Do not commit credential files. For local development, use environment variables or a local mechanism ignored by Git if such a mechanism is introduced later.
+The CLI stores the accepted TMDB API key in the per-user file `~/.title-tmdb-file/config.json` so
+later runs can start without asking for it again. This file is local application state, not a
+repository file:
+
+- never commit it or copy it into the project;
+- do not print its contents or include the key in logs, errors, previews, or debug output;
+- keep the directory and file owner-only where the operating system supports permissions;
+- use `title-tmdb-file config` to replace the saved values;
+- environment variables are optional fallback defaults for missing fields, not a second persistent
+  configuration store.
 
 ## Errors and Exit Codes
 
@@ -889,6 +966,7 @@ Messages must be short, actionable, and must not expose tokens.
 Minimum categories:
 
 - unreadable current directory;
+- unavailable, unreadable, malformed, or unwritable per-user configuration file;
 - invalid destination path;
 - folder with no eligible .mkv files;
 - invalid ID, season, or episode input;
@@ -917,8 +995,12 @@ The MVP is complete only when all of the following criteria are met:
 - [ ] Use clap for command-line parsing, --help, --version, and argument diagnostics.
 - [ ] Keep all application-owned code and user-facing text in English.
 - [ ] Provide a polished, keyboard-friendly, searchable, and responsive interactive terminal experience.
-- [ ] Ask for the TMDB API key as the first interactive question.
-- [ ] Ask for the TMDB metadata language as the second interactive question.
+- [ ] Load `~/.title-tmdb-file/config.json` before the normal interactive workflow.
+- [ ] Ask for the TMDB API key first only when the saved API key is missing or invalid.
+- [ ] Ask for the TMDB metadata language next only when the saved language is missing or invalid.
+- [ ] Skip both startup prompts when both saved fields are valid.
+- [ ] Persist a complete configuration without exposing the API key in application output.
+- [ ] Provide `title-tmdb-file config` to deliberately edit and save both fields.
 - [ ] Validate the API key and language before filesystem discovery.
 - [ ] Start in the current directory without requiring a separate source-folder configuration.
 - [ ] Ask for the destination after startup configuration and before listing sources.
@@ -1016,15 +1098,15 @@ The detailed implementation breakdown is maintained in [Implementation Tasks](ta
 
 ### Phase 1 — Interactive skeleton
 
-- [ ] Implement the clap command parser and verify its help/version output.
-- [ ] Choose and validate the dedicated interactive terminal UI library.
+- [x] Implement the clap command parser and verify its help/version output.
+- [x] Choose and validate the dedicated interactive terminal UI library.
 - [ ] Implement discovery of the current directory and destination.
 - [ ] Implement multiple-folder and .mkv selection.
 - [ ] Implement cancellation and local validation.
 
 ### Phase 2 — TMDB
 
-- [ ] Implement secure credential configuration.
+- [x] Implement per-user credential persistence and the shared configuration wizard.
 - [ ] Implement movie and series searches.
 - [ ] Implement ID confirmation.
 - [ ] Implement details and episode validation.

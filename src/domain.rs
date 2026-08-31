@@ -5,6 +5,8 @@ pub enum RunOutcome {
     Cancelled,
     /// The CLI foundation completed its startup setup.
     StartupConfigured,
+    /// The saved TMDB configuration was intentionally updated by the `config` command.
+    ConfigurationUpdated,
 }
 
 impl RunOutcome {

@@ -62,7 +62,10 @@ title-tmdb-file/
 
 The remaining media-organization workflow is still a placeholder. Do not describe TMDB verification, filesystem discovery, naming, planning, or movement as already available.
 
-The CLI foundation is now implemented: command parsing, interactive terminal contracts, startup input collection, and local configuration validation are available. TMDB verification, filesystem discovery, naming, planning, and movement are still unimplemented until their respective tasks are completed.
+The CLI foundation is now implemented: command parsing, interactive terminal contracts, per-user
+configuration persistence, the shared configuration wizard, and local configuration validation are
+available. TMDB verification, filesystem discovery, naming, planning, and movement are still
+unimplemented until their respective tasks are completed.
 
 The repository is a binary application, not a library product at this stage. Nevertheless, the core logic must be structured so it can be tested without driving a real terminal or contacting the real TMDB service.
 
@@ -72,32 +75,37 @@ README.md is the authoritative product specification. The following rules are re
 
 ### Startup configuration
 
-The normal interactive run has a mandatory startup configuration stage before any destination or source-folder discovery.
+The normal interactive run has a mandatory startup configuration stage before any destination or source-folder discovery. The stage is backed by the per-user file `~/.title-tmdb-file/config.json` (or the equivalent current-user home path on Windows).
 
 Required order:
 
-1. prompt for the TMDB API key with masked/password-style input;
-2. prompt for the TMDB metadata language;
-3. validate the key and language;
-4. continue to current-directory, destination, and source discovery only after configuration succeeds.
+1. resolve and load the per-user JSON configuration;
+2. prompt for the TMDB API key with masked/password-style input only when that field is missing or invalid;
+3. prompt for the TMDB metadata language only when that field is missing or invalid;
+4. validate the resulting local configuration;
+5. persist a complete configuration when a missing value was collected;
+6. continue to current-directory, destination, and source discovery only after configuration succeeds.
 
 Rules:
 
-- the API-key prompt must always be shown on a normal interactive run;
-- TMDB_API_KEY may supply a masked default, but it must not silently bypass the prompt;
-- the key must remain in memory only for the current execution;
+- a complete, valid saved configuration must not trigger either startup prompt on a normal run;
+- if the file is missing, the API-key prompt comes before the language prompt;
+- if only one field is missing, prompt only for that field;
+- `TMDB_API_KEY` may supply a masked default when the saved key is unavailable, but it must not bypass a required prompt;
+- `TMDB_LANGUAGE` may supply a language default when the saved language is unavailable, but it must not bypass a required prompt;
+- the `config` clap subcommand must deliberately reopen both fields and reuse the same prompt, validation, and persistence implementation;
+- the API key is persisted only in the documented per-user configuration file and remains in memory while the current execution uses it;
 - the language must be selected through an English prompt;
 - pt-BR is the initial language default;
-- TMDB_LANGUAGE may supply a default, but the language prompt must still be shown;
 - the selected metadata language does not translate the application UI;
 - an invalid key or language must allow retry or safe cancellation;
-- help, version, and invalid-command paths handled by clap occur before this wizard and must not require a key or network access.
+- help, version, command help, and invalid-command paths handled by clap occur before this wizard and must not require a key, network access, or a readable media directory.
 
 ### Source and destination
 
 - The application uses the process current working directory as the source root.
 - The executable's directory is not automatically the source root.
-- Before filesystem discovery, the application must ask for the TMDB API key and metadata language.
+- Before filesystem discovery, the application must load a complete TMDB configuration and collect only missing or invalid fields.
 - The destination folder is requested after startup configuration and before source folders are listed.
 - Destination paths may be absolute or relative to the current working directory.
 - A destination that does not exist may be created only after explicit user confirmation.
@@ -420,6 +428,7 @@ Keep dependencies small and justified.
 Likely categories include:
 
 - clap for command-line parsing, help, version, and argument diagnostics;
+- serde and serde_json for the small, explicit per-user configuration schema;
 - an HTTP client;
 - serde and JSON deserialization;
 - typed error handling;
@@ -438,7 +447,7 @@ Before adding a dependency:
 
 clap is a required dependency, but its exact version must still be selected according to the project's supported Rust toolchain. The interactive prompt/rendering library is a separate dependency and must be evaluated for keyboard navigation, multiple selection, search, styling, terminal fallback, maintenance, and platform support. Do not invent a package name or put an unverified crate into Cargo.toml.
 
-Task 01 selected `clap` for command parsing, `dialoguer` for interactive prompts and keyboard selection, `indicatif` for spinner/progress feedback, and `thiserror` for typed errors. These dependencies must remain behind the appropriate boundaries. The current dialoguer adapter provides searchable selection by filtering long lists before handing the visible options to its selection controls; callers must not depend on dialoguer types directly.
+Task 01 selected `clap` for command parsing, `dialoguer` for interactive prompts and keyboard selection, `indicatif` for spinner/progress feedback, and `thiserror` for typed errors. The configuration follow-up adds `serde` and `serde_json` for the documented per-user JSON file and `tempfile` as a test-only dependency for isolated configuration tests. These dependencies must remain behind the appropriate boundaries. The current dialoguer adapter provides searchable selection by filtering long lists before handing the visible options to its selection controls; callers must not depend on dialoguer types directly.
 
 For a binary application, Cargo.lock should be generated and versioned once dependencies are introduced, unless the repository's explicit policy changes.
 
@@ -486,7 +495,7 @@ app.rs orchestrates the use case.
 
 It should coordinate:
 
-1. startup API-key and language configuration;
+1. loading the per-user TMDB configuration and collecting only missing fields;
 2. TMDB configuration validation;
 3. current-directory discovery;
 4. destination selection;
@@ -501,7 +510,7 @@ It should coordinate:
 
 It should depend on abstractions or focused modules, not on terminal-specific implementation details.
 
-The application layer may decide which step happens next, but it must not contain low-level path manipulation, raw HTTP parsing, or prompt rendering details.
+The application layer may decide which step happens next, but it must not contain low-level path manipulation, raw HTTP parsing, or prompt rendering details. The normal organization workflow and the `config` command must call the shared configuration service rather than duplicate prompt or save logic.
 
 ### cli.rs
 
@@ -510,6 +519,7 @@ cli.rs is the clap command-line boundary and the interactive terminal boundary.
 It should:
 
 - define the clap Parser, Subcommand, and argument types;
+- dispatch the default organization wizard and the `config` subcommand;
 - render the interactive wizard through a dedicated terminal UI adapter;
 - collect text, masked secrets, language choices, single-choice, multiple-choice, confirmation, and numeric input;
 - show step indicators, progress, previews, warnings, errors, and reports;
@@ -529,6 +539,10 @@ The CLI layer must not:
 - silently choose a search result;
 - log credentials.
 
+The `config` subcommand must not start source-folder discovery or any media operation. `--help`,
+`--version`, and `config --help` must be handled by clap before configuration files, credentials,
+the network, or media directories are accessed.
+
 Keep prompt text in one place where possible. This makes future localization, snapshot tests, and wording changes safer.
 
 ### ui.rs
@@ -543,12 +557,29 @@ It should handle:
 
 - current working directory;
 - destination input normalization;
-- TMDB_API_KEY default loading;
-- the interactive API-key and language configuration;
+- the standard per-user configuration path (`~/.title-tmdb-file/config.json`, with the platform's home-directory convention);
+- loading optional JSON fields so missing configuration can be detected;
+- writing a complete JSON configuration with safe file permissions;
+- TMDB_API_KEY fallback loading;
+- the shared interactive API-key and language configuration flow;
 - TMDB language;
 - timeout and other explicitly supported settings.
 
-Configuration parsing should be separate from business validation. For example, reading a masked default from TMDB_API_KEY is configuration parsing; deciding whether a series episode exists is domain/API validation. The interactive prompt must still be shown even when an environment default is available.
+Configuration parsing should be separate from business validation. For example, reading the saved
+JSON file and a masked default from TMDB_API_KEY is configuration parsing; deciding whether a series
+episode exists is domain/API validation. The normal workflow asks only for missing or invalid saved
+fields. The `config` command requests both fields through the same reusable function. A complete
+saved configuration must not be rewritten merely because the normal workflow started.
+
+Use a storage model with optional fields rather than deserializing directly into `StartupConfig`.
+This makes a missing API key or language visible and prevents an incomplete file from being treated
+as verified configuration. The saved JSON field names are `tmdb_api_key` and `tmdb_language`.
+
+The API key is intentionally persisted in the user configuration file because that is the product
+requirement. On Unix-like systems, create a newly needed configuration directory with mode `0700`
+and the file with mode `0600`. Never include the key in `Debug`, errors, logs, previews, plan data,
+or any path. A malformed file must fail the normal workflow with an actionable message; the
+explicit `config` command may replace it after prompting.
 
 Do not expose raw secret strings through Debug output. If a configuration struct derives Debug, redact or omit credential fields.
 
@@ -751,15 +782,23 @@ The following invariants must be enforced by code, not left as comments.
 
 ### Authentication and startup configuration
 
-The normal interactive workflow must ask for the TMDB API key before destination selection or filesystem discovery.
+The normal interactive workflow must load the complete TMDB configuration before destination selection or filesystem discovery. It must ask only for missing or invalid saved fields.
 
 Configuration behavior:
 
-1. show a masked API-key prompt;
-2. use TMDB_API_KEY as a masked default when present, while still showing the prompt;
-3. keep the confirmed key in memory for the current execution only;
-4. validate the key before the workflow reaches filesystem selection;
-5. fail clearly when the key is missing or rejected.
+1. resolve the current user's configuration path;
+2. load `tmdb_api_key` and `tmdb_language` as optional fields;
+3. show a masked API-key prompt only when the saved key is absent or invalid;
+4. show the language prompt only when the saved language is absent or invalid;
+5. use environment variables only as defaults for missing fields;
+6. save a complete local configuration after the missing values are accepted;
+7. keep the confirmed key in memory for the current execution;
+8. validate the key before the workflow reaches filesystem selection;
+9. fail clearly when the key is missing or rejected.
+
+The `config` subcommand is the explicit update path. It must always reopen both fields, use the
+existing values as editable defaults where appropriate, and call the same shared prompt and storage
+code as the normal workflow. Do not maintain a second implementation for configuration editing.
 
 The MVP uses the TMDB API-key authentication path. Do not add a second authentication mechanism or silently change authentication behavior without updating README.md and this file.
 
@@ -769,8 +808,12 @@ Never:
 - include a credential in a URL shown to the user;
 - store a credential in a plan;
 - serialize a credential in a debug report;
-- commit a credential file;
+- commit the per-user credential file;
 - use a credential as a cache key that could appear in logs.
+
+The API key may be serialized only to the documented per-user `config.json` file, after explicit
+user input or reuse of an existing saved value. Keep the file out of the repository and apply
+owner-only permissions where supported.
 
 ### Endpoints
 
@@ -878,21 +921,28 @@ A clap parser may contain future options, but an option must not be exposed unti
 For a normal interactive invocation, the exact high-level order is:
 
 1. clap parses the command line;
-2. the UI asks for the TMDB API key using a masked input;
-3. the UI asks for the TMDB metadata language;
-4. the application validates the key and language;
-5. the application obtains and validates the current working directory;
-6. the UI asks for the destination;
-7. the UI lists and selects source folders;
-8. the UI lists and selects direct .mkv files for each folder;
-9. the UI identifies one movie or series per source folder;
-10. the UI collects season and episode per series file;
-11. the application builds and validates the complete plan;
-12. the UI displays the complete preview;
-13. the UI asks for explicit confirmation;
-14. the executor performs the approved plan and the UI shows the final report.
+2. the application resolves and loads the per-user JSON configuration;
+3. the UI asks for the TMDB API key using masked input only if the saved key is missing or invalid;
+4. the UI asks for the TMDB metadata language only if the saved language is missing or invalid;
+5. the application validates the key and language;
+6. the application saves a complete configuration when missing fields were collected;
+7. the application obtains and validates the current working directory;
+8. the UI asks for the destination;
+9. the UI lists and selects source folders;
+10. the UI lists and selects direct .mkv files for each folder;
+11. the UI identifies one movie or series per source folder;
+12. the UI collects season and episode per series file;
+13. the application builds and validates the complete plan;
+14. the UI displays the complete preview;
+15. the UI asks for explicit confirmation;
+16. the executor performs the approved plan and the UI shows the final report.
 
-The API-key and language questions must happen before destination, source-folder, or video-file discovery. The only earlier user-visible paths are clap's --help, --version, and invalid-argument handling.
+When both configuration fields are missing, the API-key and language questions happen in that order
+before destination, source-folder, or video-file discovery. If the configuration file is complete,
+neither question is shown. The `config` command follows a separate, explicit order: clap parses the
+command, the UI opens both shared configuration prompts, the application validates and saves them,
+and the command exits without discovering or moving media. The only earlier user-visible paths are
+clap's --help, --version, command help, and invalid-argument handling.
 
 ### Interactive UI boundary
 
@@ -1478,11 +1528,15 @@ Avoid combining a broad refactor with a behavior change unless the refactor is n
 
 ### Secrets
 
-- Read TMDB_API_KEY only as a masked default for the mandatory startup prompt, or use a later approved secret mechanism.
-- Keep secret fields out of Debug, Display, error chains, snapshots, and reports.
+- Store the accepted TMDB API key only in the documented per-user `~/.title-tmdb-file/config.json` file and in memory for the current execution; this persistence is an explicit product requirement.
+- Read `TMDB_API_KEY` only as a masked fallback default when the saved key is unavailable; it must not bypass a required prompt.
+- Read `TMDB_LANGUAGE` only as a fallback default when the saved language is unavailable.
+- Keep secret fields out of Debug, Display, error chains, snapshots, plans, and reports, except for the intentional JSON serialization inside the configuration storage boundary.
+- On Unix-like systems, create a newly needed configuration directory with mode `0700` and the configuration file with mode `0600`.
+- Do not print configuration-file contents or include the API key in diagnostics.
 - Do not pass API keys through shell commands.
 - Do not include tokens in URLs printed to the terminal.
-- Do not commit .env files containing real credentials.
+- Do not commit `config.json`, `.env`, or any other file containing real credentials.
 - If .env support is added, ensure the file is ignored and document the behavior without documenting any real value.
 
 ### External data
@@ -1746,7 +1800,11 @@ Do not:
 - write live-TMDB-dependent tests;
 - add a persistent database before the product asks for one;
 - change the default TMDB language merely because documentation is in English;
-- bypass the mandatory API-key and language prompts during a normal interactive run;
+- prompt for already-complete saved configuration during a normal interactive run;
+- prompt for a field that is already complete when only the other field is missing;
+- duplicate the configuration wizard for the normal command and the `config` command;
+- overwrite the configuration file when a complete normal-run configuration does not need changes;
+- expose the API key while displaying or diagnosing the configuration file;
 - put Portuguese application text in the English CLI;
 - use a raw TMDB title directly as a filename;
 - assume that a colon is valid on every supported operating system;
@@ -1764,7 +1822,8 @@ Before handing off any implementation change, verify:
 - [ ] I identified whether the request changes product behavior.
 - [ ] I confirmed that clap remains the command-line parser.
 - [ ] I kept all application-owned code and text in English.
-- [ ] I verified that the API key and language are requested before filesystem discovery.
+- [ ] I verified that the saved configuration is loaded and only missing or invalid fields are requested before filesystem discovery.
+- [ ] I verified that the `config` command reuses the normal configuration prompt and persistence code.
 - [ ] I kept UI, domain, TMDB, naming, and filesystem responsibilities separated.
 - [ ] I used typed values and errors at important boundaries.
 - [ ] I preserved the one-item-per-source-folder rule.

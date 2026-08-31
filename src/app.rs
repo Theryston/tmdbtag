@@ -1,49 +1,34 @@
 use crate::{
-    config::{StartupConfig, tmdb_api_key_default, tmdb_language_default},
+    config::{ConfigPromptMode, ConfigStore, configure_interactively},
     domain::RunOutcome,
     error::AppResult,
     ui::{InteractiveUi, MessageLevel},
 };
 
-/// Runs the currently implemented portion of the interactive workflow.
-///
-/// Task 01 intentionally stops after collecting local startup values. TMDB validation, current
-/// directory discovery, and media organization are owned by later tasks. Keeping this boundary
-/// explicit prevents the foundation from pretending that an unimplemented move workflow exists.
+/// Runs the default interactive workflow using the current user's configuration file.
 pub fn run<U: InteractiveUi>(ui: &mut U, version: &str) -> AppResult<RunOutcome> {
+    let store = ConfigStore::for_current_user()?;
+    run_with_store(ui, version, &store)
+}
+
+/// Runs the default workflow with an explicit configuration store.
+///
+/// The explicit-store boundary keeps orchestration tests isolated from the real home directory
+/// while the production entry point continues to use the documented per-user location.
+pub fn run_with_store<U: InteractiveUi>(
+    ui: &mut U,
+    version: &str,
+    store: &ConfigStore,
+) -> AppResult<RunOutcome> {
     ui.show_welcome(version)?;
 
-    let api_key_default = tmdb_api_key_default();
-    let language_default = tmdb_language_default();
-
-    let startup_config = loop {
-        ui.show_step(1, 2, "TMDB API key")?;
-        let Some(api_key) = ui.ask_masked_secret("TMDB API key", api_key_default.as_deref())?
-        else {
-            ui.show_message(MessageLevel::Info, "Startup configuration canceled.")?;
-            return Ok(RunOutcome::Cancelled);
-        };
-
-        ui.show_step(2, 2, "TMDB metadata language")?;
-        let Some(language) =
-            ui.ask_text("TMDB metadata language", Some(language_default.as_str()))?
-        else {
-            ui.show_message(MessageLevel::Info, "Startup configuration canceled.")?;
-            return Ok(RunOutcome::Cancelled);
-        };
-
-        match StartupConfig::new(api_key, language) {
-            Ok(config) => break config,
-            Err(error) => {
-                ui.show_message(MessageLevel::Error, &error.to_string())?;
-            }
-        }
+    let Some(_startup_config) = configure_interactively(ui, store, ConfigPromptMode::MissingOnly)?
+    else {
+        ui.show_message(MessageLevel::Info, "Startup configuration canceled.")?;
+        return Ok(RunOutcome::Cancelled);
     };
 
-    // Keep the value alive until the startup stage is complete. Later tasks will pass it to the
-    // TMDB client, while the secret remains outside UI messages, plans, and debug output.
-    let _startup_config = startup_config;
-    ui.show_message(MessageLevel::Success, "Startup configuration captured.")?;
+    ui.show_message(MessageLevel::Success, "TMDB configuration is ready.")?;
     ui.show_message(
         MessageLevel::Info,
         "TMDB verification and media organization will be connected in the next tasks.",
@@ -52,8 +37,41 @@ pub fn run<U: InteractiveUi>(ui: &mut U, version: &str) -> AppResult<RunOutcome>
     Ok(RunOutcome::StartupConfigured)
 }
 
+/// Runs the `config` command, which deliberately reopens both shared configuration prompts.
+pub fn run_config<U: InteractiveUi>(ui: &mut U, version: &str) -> AppResult<RunOutcome> {
+    let store = ConfigStore::for_current_user()?;
+    run_config_with_store(ui, version, &store)
+}
+
+/// Runs the `config` command with an explicit configuration store for isolated tests.
+pub fn run_config_with_store<U: InteractiveUi>(
+    ui: &mut U,
+    version: &str,
+    store: &ConfigStore,
+) -> AppResult<RunOutcome> {
+    ui.show_welcome(version)?;
+
+    let Some(_startup_config) = configure_interactively(ui, store, ConfigPromptMode::ReplaceAll)?
+    else {
+        ui.show_message(MessageLevel::Info, "Configuration update canceled.")?;
+        return Ok(RunOutcome::Cancelled);
+    };
+
+    ui.show_message(MessageLevel::Success, "TMDB configuration saved.")?;
+    ui.show_message(
+        MessageLevel::Info,
+        &format!("Configuration file: {}", store.path().display()),
+    )?;
+
+    Ok(RunOutcome::ConfigurationUpdated)
+}
+
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
     use super::*;
     use crate::{
         error::UiResult,
@@ -145,25 +163,49 @@ mod tests {
 
     #[test]
     fn startup_questions_are_asked_in_the_required_order() {
+        let directory = tempdir().unwrap();
+        let store = ConfigStore::from_path(directory.path().join("config.json"));
         let mut ui = RecordingUi::default();
 
-        let outcome = run(&mut ui, "0.1.0").unwrap();
+        let outcome = run_with_store(&mut ui, "0.1.0", &store).unwrap();
 
         assert_eq!(outcome, RunOutcome::StartupConfigured);
-        assert_eq!(ui.events[1], "step:1/2:TMDB API key");
-        assert_eq!(ui.events[2], "secret:TMDB API key");
-        assert_eq!(ui.events[3], "step:2/2:TMDB metadata language");
-        assert_eq!(ui.events[4], "text:TMDB metadata language");
+        assert!(
+            ui.events
+                .iter()
+                .position(|event| event == "step:1/2:TMDB API key")
+                .is_some()
+        );
+        assert!(
+            ui.events
+                .iter()
+                .position(|event| event == "secret:TMDB API key")
+                .is_some()
+        );
+        assert!(
+            ui.events
+                .iter()
+                .position(|event| event == "step:2/2:TMDB metadata language")
+                .is_some()
+        );
+        assert!(
+            ui.events
+                .iter()
+                .position(|event| event == "text:TMDB metadata language")
+                .is_some()
+        );
     }
 
     #[test]
     fn canceling_the_api_key_prompt_performs_no_later_work() {
+        let directory = tempdir().unwrap();
+        let store = ConfigStore::from_path(directory.path().join("config.json"));
         let mut ui = RecordingUi {
             cancel_on_secret: true,
             ..RecordingUi::default()
         };
 
-        let outcome = run(&mut ui, "0.1.0").unwrap();
+        let outcome = run_with_store(&mut ui, "0.1.0", &store).unwrap();
 
         assert_eq!(outcome, RunOutcome::Cancelled);
         assert!(!ui.events.iter().any(|event| event.starts_with("text:")));
@@ -176,12 +218,14 @@ mod tests {
 
     #[test]
     fn canceling_the_language_prompt_does_not_capture_configuration() {
+        let directory = tempdir().unwrap();
+        let store = ConfigStore::from_path(directory.path().join("config.json"));
         let mut ui = RecordingUi {
             cancel_on_language: true,
             ..RecordingUi::default()
         };
 
-        let outcome = run(&mut ui, "0.1.0").unwrap();
+        let outcome = run_with_store(&mut ui, "0.1.0", &store).unwrap();
 
         assert_eq!(outcome, RunOutcome::Cancelled);
         assert!(
@@ -192,7 +236,92 @@ mod tests {
         assert!(
             !ui.events
                 .iter()
-                .any(|event| { event == "message:Success:Startup configuration captured." })
+                .any(|event| { event == "message:Success:TMDB configuration is ready." })
         );
+    }
+
+    #[test]
+    fn a_complete_saved_configuration_skips_startup_prompts() {
+        let directory = tempdir().unwrap();
+        let store = ConfigStore::from_path(directory.path().join("config.json"));
+        let mut first_ui = RecordingUi::default();
+        run_with_store(&mut first_ui, "0.1.0", &store).unwrap();
+
+        let mut second_ui = RecordingUi::default();
+        let outcome = run_with_store(&mut second_ui, "0.1.0", &store).unwrap();
+
+        assert_eq!(outcome, RunOutcome::StartupConfigured);
+        assert!(
+            !second_ui
+                .events
+                .iter()
+                .any(|event| event.starts_with("step:"))
+        );
+        assert!(
+            !second_ui
+                .events
+                .iter()
+                .any(|event| event.starts_with("secret:") || event.starts_with("text:"))
+        );
+    }
+
+    #[test]
+    fn a_partial_saved_configuration_prompts_only_for_the_missing_language() {
+        let directory = tempdir().unwrap();
+        let store = ConfigStore::from_path(directory.path().join("config.json"));
+        fs::write(store.path(), r#"{"tmdb_api_key":"stored-api-key"}"#).unwrap();
+        let mut ui = RecordingUi::default();
+
+        let outcome = run_with_store(&mut ui, "0.1.0", &store).unwrap();
+
+        assert_eq!(outcome, RunOutcome::StartupConfigured);
+        assert!(!ui.events.iter().any(|event| event.starts_with("secret:")));
+        assert!(
+            ui.events
+                .iter()
+                .any(|event| event == "step:1/1:TMDB metadata language")
+        );
+        assert!(
+            ui.events
+                .iter()
+                .any(|event| event == "text:TMDB metadata language")
+        );
+    }
+
+    #[test]
+    fn config_command_reuses_the_same_prompts_but_reopens_both_fields() {
+        let directory = tempdir().unwrap();
+        let store = ConfigStore::from_path(directory.path().join("config.json"));
+        let mut first_ui = RecordingUi::default();
+        run_with_store(&mut first_ui, "0.1.0", &store).unwrap();
+
+        let mut ui = RecordingUi::default();
+        let outcome = run_config_with_store(&mut ui, "0.1.0", &store).unwrap();
+
+        assert_eq!(outcome, RunOutcome::ConfigurationUpdated);
+        assert!(ui.events.iter().any(|event| event == "secret:TMDB API key"));
+        assert!(
+            ui.events
+                .iter()
+                .any(|event| event == "text:TMDB metadata language")
+        );
+    }
+
+    #[test]
+    fn canceling_config_update_preserves_the_existing_file() {
+        let directory = tempdir().unwrap();
+        let store = ConfigStore::from_path(directory.path().join("config.json"));
+        let mut first_ui = RecordingUi::default();
+        run_with_store(&mut first_ui, "0.1.0", &store).unwrap();
+        let original = fs::read_to_string(store.path()).unwrap();
+
+        let mut ui = RecordingUi {
+            cancel_on_secret: true,
+            ..RecordingUi::default()
+        };
+        let outcome = run_config_with_store(&mut ui, "0.1.0", &store).unwrap();
+
+        assert_eq!(outcome, RunOutcome::Cancelled);
+        assert_eq!(fs::read_to_string(store.path()).unwrap(), original);
     }
 }

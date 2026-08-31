@@ -87,12 +87,13 @@ The interface should return typed values and typed cancellation instead of makin
 The normal interactive order must be represented in the application flow even before all capability tasks are complete:
 
 1. `clap` parses the command line.
-2. The UI asks for the TMDB API key using masked input.
-3. The UI asks for the TMDB metadata language.
-4. The application validates the startup configuration through the TMDB boundary.
-5. The application obtains the current working directory.
-6. The UI asks for the destination folder.
-7. The remaining source, media, identification, planning, and execution steps follow.
+2. The application loads the per-user TMDB configuration.
+3. The UI asks for the TMDB API key using masked input only when the saved key is missing or invalid.
+4. The UI asks for the TMDB metadata language only when the saved language is missing or invalid.
+5. The application validates and persists a complete startup configuration.
+6. The application obtains the current working directory.
+7. The UI asks for the destination folder.
+8. The remaining source, media, identification, planning, and execution steps follow.
 
 Task 01 owns the flow boundary and interaction contracts. Task 02 owns the real credential and language validation. Task 03 owns filesystem discovery. Do not bypass the order merely because a later subsystem is not implemented yet; use typed stubs or test doubles during incremental development.
 
@@ -139,7 +140,7 @@ Do not implement in this task:
 - filesystem traversal or `.mkv` filtering;
 - filename normalization or parsing;
 - moving, copying, renaming, deleting, or creating media files/directories;
-- a persistent configuration file or database;
+- persistent TMDB metadata caching or a local database;
 - a non-interactive automation mode;
 - mouse-only controls;
 - Portuguese application text;
@@ -184,7 +185,7 @@ Use a fake or scripted UI in application tests. Do not require a human, a real t
 - [x] `title-tmdb-file --version` exits without credentials, network access, or filesystem discovery.
 - [x] The default invocation enters the interactive workflow.
 - [x] The UI boundary supports masked input, searchable selection, multiple selection, confirmation, cancellation, and progress contracts.
-- [x] The API-key question precedes the language question, and both precede filesystem discovery.
+- [x] When configuration questions are needed, the API-key question precedes the language question, and both precede filesystem discovery.
 - [x] All application-owned text is English.
 - [x] The UI remains understandable without color and in a narrow terminal.
 - [x] `main.rs` contains no business rules or file operations.

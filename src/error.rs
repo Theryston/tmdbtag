@@ -1,9 +1,10 @@
-use std::io;
+use std::{io, path::PathBuf};
 
+use serde_json::Error as JsonError;
 use thiserror::Error;
 
 /// Errors raised while collecting or validating startup configuration.
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Error)]
 pub enum ConfigError {
     /// The user did not provide an API key.
     #[error("A TMDB API key is required.")]
@@ -11,6 +12,64 @@ pub enum ConfigError {
     /// The selected language is not a plausible TMDB locale tag.
     #[error("The TMDB metadata language must be a locale such as pt-BR or en-US.")]
     InvalidLanguage,
+    /// The current user's home directory could not be resolved.
+    #[error("The current user's home directory could not be resolved.")]
+    HomeDirectoryUnavailable,
+    /// The application could not read its configuration file.
+    #[error("Cannot read the TMDB configuration file at {path}: {source}")]
+    Read {
+        /// The path that was read.
+        path: PathBuf,
+        /// The operating-system error.
+        #[source]
+        source: io::Error,
+    },
+    /// The configuration file is not valid JSON or does not match the supported schema.
+    #[error(
+        "The TMDB configuration file at {path} is invalid: {source}. Run `title-tmdb-file config` to replace it."
+    )]
+    InvalidFile {
+        /// The path containing invalid data.
+        path: PathBuf,
+        /// The JSON parsing error without echoing the file contents.
+        #[source]
+        source: JsonError,
+    },
+    /// The application could not create the private configuration directory.
+    #[error("Cannot create the TMDB configuration directory at {path}: {source}")]
+    CreateDirectory {
+        /// The directory that was requested.
+        path: PathBuf,
+        /// The operating-system error.
+        #[source]
+        source: io::Error,
+    },
+    /// The application could not persist the configuration file.
+    #[error("Cannot write the TMDB configuration file at {path}: {source}")]
+    Write {
+        /// The path that was written.
+        path: PathBuf,
+        /// The operating-system error.
+        #[source]
+        source: io::Error,
+    },
+    /// The in-memory configuration could not be encoded as JSON.
+    #[error("Cannot serialize the TMDB configuration: {0}")]
+    Serialize(#[source] JsonError),
+}
+
+impl ConfigError {
+    /// Returns the exit code appropriate for a configuration failure.
+    pub const fn exit_code(&self) -> i32 {
+        match self {
+            Self::MissingApiKey | Self::InvalidLanguage | Self::InvalidFile { .. } => 2,
+            Self::HomeDirectoryUnavailable
+            | Self::Read { .. }
+            | Self::CreateDirectory { .. }
+            | Self::Write { .. }
+            | Self::Serialize(_) => 1,
+        }
+    }
 }
 
 /// Errors raised at the interactive terminal boundary.
@@ -63,7 +122,8 @@ impl AppError {
     /// Maps the typed application error to the documented CLI exit-code contract.
     pub const fn exit_code(&self) -> i32 {
         match self {
-            Self::Configuration(_) | Self::NonInteractive => 2,
+            Self::Configuration(error) => error.exit_code(),
+            Self::NonInteractive => 2,
             Self::Ui(_) => 1,
         }
     }
