@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/Theryston/tmdbtag/compare/tmdbtag-v0.1.0...tmdbtag-v0.1.1) - 2026-08-31
+
+### Fixed
+
+- .gitignore
+
+### Other
+
+- Implement multi-bucket S3 catalog with per-run prefixes
+- Add S3 storage backends and cross-storage transfers
+
 ## [0.1.0](https://github.com/Theryston/tmdbtag/releases/tag/tmdbtag-v0.1.0) - 2026-08-31
 
 ### Fixed
