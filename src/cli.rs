@@ -19,8 +19,8 @@ use indicatif::{ProgressBar, ProgressStyle};
 use crate::{
     app,
     domain::{
-        EpisodeRef, IdentificationMethod, MediaType, OperationStatus, RunOutcome, SourceRoot,
-        TmdbItem, TmdbSearchCandidate, VideoFile,
+        EpisodeRef, FileOperation, IdentificationMethod, MediaType, OperationStatus, RunOutcome,
+        SourceRoot, TmdbItem, TmdbSearchCandidate, VideoFile,
     },
     error::{AppError, AppResult, TmdbError, UiError, UiResult},
     ui::{InteractiveUi, MessageLevel, ProgressOutput, TmdbInteraction},
@@ -805,6 +805,26 @@ impl InteractiveUi for TerminalUi {
         self.write_line(&line)
     }
 
+    fn choose_file_operation(&mut self) -> UiResult<Option<FileOperation>> {
+        let items = vec![
+            "Copy selected videos (keep originals)".to_owned(),
+            "Move selected videos (remove originals after success)".to_owned(),
+        ];
+        let selection = self.select_one(
+            "How should the selected videos be processed?",
+            &items,
+            false,
+        )?;
+        match selection {
+            None => Ok(None),
+            Some(0) => Ok(Some(FileOperation::Copy)),
+            Some(1) => Ok(Some(FileOperation::Move)),
+            Some(_) => Err(UiError::InvalidSelection {
+                context: "file operation",
+            }),
+        }
+    }
+
     fn show_file_context(
         &mut self,
         current_file: usize,
@@ -986,14 +1006,20 @@ impl InteractiveUi for TerminalUi {
     }
 
     fn start_activity(&mut self, message: &str) -> UiResult<Box<dyn ProgressOutput>> {
-        let style = ProgressStyle::with_template("{spinner:.cyan} {msg}")
+        let spinner_style = ProgressStyle::with_template("{spinner:.cyan} {msg}")
             .map_err(|error| UiError::ProgressStyle(error.to_string()))?;
+        let transfer_style =
+            ProgressStyle::with_template("{spinner:.cyan} {bar:40.cyan/blue} {percent:>3}% {msg}")
+                .map_err(|error| UiError::ProgressStyle(error.to_string()))?;
         let progress = ProgressBar::new_spinner();
-        progress.set_style(style);
+        progress.set_style(spinner_style);
         progress.enable_steady_tick(Duration::from_millis(80));
         progress.set_message(message.to_owned());
 
-        Ok(Box::new(IndicatifProgress { progress }))
+        Ok(Box::new(IndicatifProgress {
+            progress,
+            transfer_style,
+        }))
     }
 
     fn show_plan_preview(&mut self, plan: &crate::domain::OperationPlan) -> UiResult<()> {
@@ -1013,7 +1039,20 @@ impl InteractiveUi for TerminalUi {
             "Destination: {} ({destination_status})",
             crate::ui::display_relative_path(plan.destination().path(), source_root)
         ))?;
+        self.write_line(&format!(
+            "Operation: {}{}",
+            plan.operation().label(),
+            if plan.operation().preserves_source() {
+                " (original files will be kept)"
+            } else {
+                " (original files will be removed after successful publication)"
+            }
+        ))?;
         self.write_line(&format!("Total files: {}", plan.operation_count()))?;
+        self.write_line(&format!(
+            "Total bytes: {}",
+            crate::ui::format_file_size(plan.total_size_bytes())
+        ))?;
         self.write_line("")?;
 
         for operation in plan.operations() {
@@ -1047,7 +1086,9 @@ impl InteractiveUi for TerminalUi {
         self.write_line("")?;
         self.write_line(&format!(
             "{}",
-            dialoguer::console::style("Execution report").cyan().bold()
+            dialoguer::console::style(format!("{} execution report", report.operation().label()))
+                .cyan()
+                .bold()
         ))?;
         self.write_line(&format!(
             "Completed: {} · Failed: {} · Pending: {}",
@@ -1160,14 +1201,37 @@ impl TmdbInteraction for TerminalUi {
     }
 }
 
-#[derive(Debug)]
 struct IndicatifProgress {
     progress: ProgressBar,
+    transfer_style: ProgressStyle,
+}
+
+impl std::fmt::Debug for IndicatifProgress {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("IndicatifProgress")
+            .field("progress", &self.progress)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ProgressOutput for IndicatifProgress {
     fn set_message(&self, message: &str) {
         self.progress.set_message(message.to_owned());
+    }
+
+    fn set_progress(&self, completed_bytes: u64, total_bytes: u64) {
+        // An empty plan is not executable, but zero-byte videos are valid. Give that edge case a
+        // one-unit visual scale so the completed operation still renders as 100%.
+        self.progress.set_style(self.transfer_style.clone());
+        let display_total = total_bytes.max(1);
+        let display_position = if total_bytes == 0 {
+            1
+        } else {
+            completed_bytes.min(total_bytes)
+        };
+        self.progress.set_length(display_total);
+        self.progress.set_position(display_position);
     }
 
     fn finish_success(&self, message: &str) {

@@ -27,6 +27,44 @@ impl fmt::Display for MediaType {
     }
 }
 
+/// The filesystem operation selected for the current organization run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileOperation {
+    /// Create destination files and keep every source file unchanged.
+    Copy,
+    /// Create destination files and remove each source only after successful publication.
+    Move,
+}
+
+impl FileOperation {
+    /// Returns the English operation name used in summaries and diagnostics.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Copy => "Copy",
+            Self::Move => "Move",
+        }
+    }
+
+    /// Returns the lowercase verb used in confirmation prompts.
+    pub const fn verb(self) -> &'static str {
+        match self {
+            Self::Copy => "copy",
+            Self::Move => "move",
+        }
+    }
+
+    /// Returns whether the operation preserves the source file.
+    pub const fn preserves_source(self) -> bool {
+        matches!(self, Self::Copy)
+    }
+}
+
+impl fmt::Display for FileOperation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.label())
+    }
+}
+
 /// Common video filename extensions supported by the discovery and naming layers.
 ///
 /// The policy is intentionally extension-based. Portable filesystem metadata does not provide a
@@ -263,6 +301,7 @@ impl SelectedSource {
 pub struct FilesystemSelection {
     source_root: SourceRoot,
     destination: DestinationSelection,
+    operation: FileOperation,
     sources: Vec<SelectedSource>,
 }
 
@@ -271,11 +310,13 @@ impl FilesystemSelection {
     pub fn new(
         source_root: SourceRoot,
         destination: DestinationSelection,
+        operation: FileOperation,
         sources: Vec<SelectedSource>,
     ) -> Self {
         Self {
             source_root,
             destination,
+            operation,
             sources,
         }
     }
@@ -288,6 +329,11 @@ impl FilesystemSelection {
     /// Returns the validated destination selection.
     pub fn destination(&self) -> &DestinationSelection {
         &self.destination
+    }
+
+    /// Returns the copy-or-move operation selected for this filesystem selection.
+    pub const fn operation(&self) -> FileOperation {
+        self.operation
     }
 
     /// Returns the selected source groups in deterministic order.
@@ -411,6 +457,7 @@ impl PlannedOperation {
 pub struct OperationPlan {
     source_root: SourceRoot,
     destination: DestinationSelection,
+    operation: FileOperation,
     operations: Vec<PlannedOperation>,
 }
 
@@ -419,11 +466,13 @@ impl OperationPlan {
     pub fn new(
         source_root: SourceRoot,
         destination: DestinationSelection,
+        operation: FileOperation,
         operations: Vec<PlannedOperation>,
     ) -> Self {
         Self {
             source_root,
             destination,
+            operation,
             operations,
         }
     }
@@ -438,6 +487,11 @@ impl OperationPlan {
         &self.destination
     }
 
+    /// Returns the copy-or-move operation that execution must perform.
+    pub const fn operation(&self) -> FileOperation {
+        self.operation
+    }
+
     /// Returns operations in the stable order shown by the preview.
     pub fn operations(&self) -> &[PlannedOperation] {
         &self.operations
@@ -447,12 +501,19 @@ impl OperationPlan {
     pub fn operation_count(&self) -> usize {
         self.operations.len()
     }
+
+    /// Returns the total number of source bytes represented by this plan.
+    pub fn total_size_bytes(&self) -> u64 {
+        self.operations.iter().fold(0, |total, operation| {
+            total.saturating_add(operation.source_snapshot().size_bytes())
+        })
+    }
 }
 
 /// The final state of one attempted operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OperationStatus {
-    /// The destination was published and the source was removed.
+    /// The selected operation published the destination successfully.
     Completed,
     /// The operation failed and no later operation was started.
     Failed { reason: String },
@@ -510,14 +571,20 @@ impl OperationResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionReport {
     source_root: SourceRoot,
+    operation: FileOperation,
     results: Vec<OperationResult>,
 }
 
 impl ExecutionReport {
     /// Creates a report from results in plan order.
-    pub fn new(source_root: SourceRoot, results: Vec<OperationResult>) -> Self {
+    pub fn new(
+        source_root: SourceRoot,
+        operation: FileOperation,
+        results: Vec<OperationResult>,
+    ) -> Self {
         Self {
             source_root,
+            operation,
             results,
         }
     }
@@ -525,6 +592,11 @@ impl ExecutionReport {
     /// Returns the source root used for relative report paths.
     pub fn source_root(&self) -> &SourceRoot {
         &self.source_root
+    }
+
+    /// Returns the operation used to produce this report.
+    pub const fn operation(&self) -> FileOperation {
+        self.operation
     }
 
     /// Returns per-file results in the original plan order.

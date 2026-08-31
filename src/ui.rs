@@ -5,8 +5,8 @@ use std::{
 
 use crate::{
     domain::{
-        DestinationSelection, EpisodeRef, ExecutionReport, IdentificationMethod, MediaType,
-        OperationPlan, SourceRoot, TmdbItem, TmdbSearchCandidate, VideoFile,
+        DestinationSelection, EpisodeRef, ExecutionReport, FileOperation, IdentificationMethod,
+        MediaType, OperationPlan, SourceRoot, TmdbItem, TmdbSearchCandidate, VideoFile,
     },
     error::{TmdbError, UiResult},
 };
@@ -28,6 +28,8 @@ pub enum MessageLevel {
 pub trait ProgressOutput: fmt::Debug {
     /// Changes the message associated with the activity.
     fn set_message(&self, message: &str);
+    /// Updates the aggregate byte-based progress for the activity.
+    fn set_progress(&self, completed_bytes: u64, total_bytes: u64);
     /// Finishes the activity with a success message.
     fn finish_success(&self, message: &str);
     /// Finishes the activity with an error message.
@@ -45,6 +47,9 @@ pub trait InteractiveUi {
 
     /// Renders a stable wizard step indicator.
     fn show_step(&mut self, current: usize, total: usize, label: &str) -> UiResult<()>;
+
+    /// Asks whether selected videos should be copied or moved.
+    fn choose_file_operation(&mut self) -> UiResult<Option<FileOperation>>;
 
     /// Shows the active file line before its metadata prompts.
     ///
@@ -281,7 +286,7 @@ fn safe_display_text(value: &str) -> String {
         .collect()
 }
 
-fn format_file_size(size_bytes: u64) -> String {
+pub(crate) fn format_file_size(size_bytes: u64) -> String {
     const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
     let mut value = size_bytes as f64;
     let mut unit_index = 0;

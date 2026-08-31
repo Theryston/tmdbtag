@@ -9,7 +9,7 @@
 
 Turn the initial Rust skeleton into a stable, modern command-line application boundary. This task establishes how the executable starts, how command-line arguments are parsed, how the interactive wizard is rendered, how cancellation is represented, and how application-owned text is kept in English.
 
-This task is about the shell around the product. It must not implement the TMDB client, filesystem discovery, filename generation, or file movement. Those capabilities belong to the later tasks and should be connected through explicit interfaces rather than embedded in `main.rs`.
+This task is about the shell around the product. It must not implement the TMDB client, filesystem discovery, filename generation, or file copy/move execution. Those capabilities belong to the later tasks and should be connected through explicit interfaces rather than embedded in `main.rs`.
 
 ## Required outcome
 
@@ -79,7 +79,8 @@ The UI boundary should be able to express the following interactions without exp
 - go back, retry, or cancel where the flow allows it;
 - show a plan preview;
 - request a negative-default confirmation;
-- show per-file progress and a final report.
+- show operation progress and a final report. File-transfer progress is later
+  rendered as one aggregate byte-based bar by Task 05.
 
 The interface should return typed values and typed cancellation instead of making the application inspect raw strings or terminal escape sequences.
 

@@ -5,9 +5,9 @@ the identifier and title registered in
 [The Movie Database (TMDB)](https://www.themoviedb.org/).
 
 > Status: The documented interactive MVP workflow is implemented through plan
-> construction, preview, safe movement, and per-file reporting. Future retrieval
-> commands, non-interactive modes, and auxiliary-file support remain out of
-> scope until separately specified.
+> construction, preview, safe copy/move execution, and per-file reporting.
+> Future retrieval commands, non-interactive modes, and auxiliary-file support
+> remain out of scope until separately specified.
 
 This README is the source of truth for the expected behavior. Any
 implementation, flow change, or new feature must be compared against this
@@ -52,23 +52,24 @@ contain nested folders with video files. It must:
    Windows;
 2. ask only for missing or invalid TMDB configuration fields, using secure
    prompts;
-3. ask which folder will be used as the destination;
-4. recursively discover every recognized video file below the current directory,
+3. ask whether selected videos should be copied or moved;
+4. ask which folder will be used as the destination;
+5. recursively discover every recognized video file below the current directory,
    including videos directly in the current directory;
-5. present one expandable file-explorer selection containing video files and
+6. present one expandable file-explorer selection containing video files and
    only the folders that contain at least one video descendant;
-6. allow one or more video files to be selected from that explorer, with folders
+7. allow one or more video files to be selected from that explorer, with folders
    collapsed by default and expanded or collapsed with `Tab`;
-7. identify every selected video file as a movie or TV series by searching TMDB
+8. identify every selected video file as a movie or TV series by searching TMDB
    or entering an ID manually;
-8. ask for the season and episode for each selected video identified as a TV
+9. ask for the season and episode for each selected video identified as a TV
    series;
-9. show a complete operation plan;
-10. move the selected files to the destination folder, renaming them with enough
-    data to locate the item in TMDB again.
+10. show a complete operation plan;
+11. copy or move the selected files to the destination folder, renaming them
+    with enough data to locate the item in TMDB again.
 
 The program must not alter the video contents. Its job is to organize: select,
-rename, and move.
+rename, and either copy or move according to the explicit operation choice.
 
 ## MVP Scope
 
@@ -98,7 +99,9 @@ rename, and move.
   files in the same directory tree.
 - Manual season and episode input for each series file.
 - Plan preview before any change is made to disk.
-- Actual file movement rather than an implicit copy.
+- An explicit copy-or-move choice before destination and media selection.
+- Byte-based transfer progress for both copying and moving.
+- Independent destination copies that never modify the original source files.
 - Deterministic, filesystem-safe names.
 - Protection against accidental overwrites.
 - Per-file final report.
@@ -126,12 +129,13 @@ implicitly.
 | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Current directory  | The directory from which the executable was started. It is the source root in the MVP.                                                                                                                    |
 | Source container   | An internal validation grouping: the direct child folder containing a selected nested video, or the current source root for a video selected directly from the root. It is not a separate user selection. |
-| Destination folder | The directory selected after startup configuration, where videos will be moved. It may also be called the target folder.                                                                                  |
+| Destination folder | The directory selected after startup configuration, where videos will be copied or moved. It may also be called the target folder.                                                                         |
 | TMDB item          | A movie or TV series returned by and confirmed against TMDB.                                                                                                                                              |
 | TMDB ID            | The numeric identifier of a movie or TV series in TMDB.                                                                                                                                                   |
 | Movie              | A TMDB item of type movie.                                                                                                                                                                                |
 | Series             | A TMDB item of type tv.                                                                                                                                                                                   |
 | Episode            | The combination of a season and episode number for a TV series.                                                                                                                                           |
+| File operation     | The explicit `Copy` or `Move` mode selected before destination and media selection.                                                                                                                        |
 | Plan               | The final mapping between each source file and the name/path it will have in the destination.                                                                                                             |
 | Configuration file | The per-user JSON file at `~/.title-tmdb-file/config.json` that stores the TMDB API key and metadata language.                                                                                            |
 
@@ -174,6 +178,9 @@ Save any newly completed configuration
 Validate TMDB configuration
         |
         v
+Choose copy or move
+        |
+        v
 Choose the destination folder
         |
         v
@@ -197,10 +204,10 @@ Validate all paths and conflicts
 Display the complete preview
         |
         v
-Confirm
+Confirm copy or move
         |
         v
-Move and rename the files
+Copy or move and rename the files while showing byte progress
         |
         v
 Display the final summary
@@ -339,7 +346,20 @@ cd /path/to/input-folder
 title-tmdb-file
 ```
 
-### 4. Choosing the destination folder
+### 4. Choosing the file operation
+
+Before destination selection or media discovery, ask how the selected videos
+should be processed:
+
+- `Copy selected videos (keep originals)` creates independent destination files
+  and leaves every source file unchanged;
+- `Move selected videos (remove originals after successful publication)` removes
+  each source only after its destination has been safely published and verified.
+
+The selected operation is stored in the immutable plan and shown again in the
+preview and final report. Canceling this prompt must not touch the filesystem.
+
+### 5. Choosing the destination folder
 
 The first filesystem-related prompt must ask for the destination folder path,
 after the TMDB API key and language have been configured.
@@ -363,7 +383,7 @@ Rules:
 Once defined, the destination must remain visible throughout the rest of the
 flow.
 
-### 5. Unified video-file explorer
+### 6. Unified video-file explorer
 
 After the destination is configured, perform one recursive, read-only discovery
 from the current directory. The result feeds one interactive explorer; there is
@@ -399,7 +419,7 @@ The explorer is a single selection operation. Expanding a folder changes
 visibility only; it does not select every descendant automatically. The first
 file must never be selected silently.
 
-### 6. Identifying the item in TMDB
+### 7. Identifying the item in TMDB
 
 After the unified video array is confirmed, present two options for each
 selected file:
@@ -462,7 +482,7 @@ When the user chooses to enter an ID:
 - repeat this complete identification flow independently for every selected
   video file, including multiple files from the same directory tree.
 
-### 7. Series episode data
+### 8. Series episode data
 
 After a selected video file has been identified as a series, ask for:
 
@@ -503,12 +523,15 @@ The title used in the filename is the series title returned by TMDB, not the
 individual episode title. The series ID and combined `S<season>E<episode>` field
 identify the episode together.
 
-### 8. Plan preview
+### 9. Plan preview
 
-Before moving any file, display every operation that will be performed:
+Before copying or moving any file, display every operation that will be
+performed:
 
 ```text
 Destination: ../library/organized
+Operation: Copy (original files will be kept)
+Total bytes: 1.2 GiB
 
 SOURCE                                      DESTINATION
 movies/Fight Club.mkv                       ../library/organized/550__S__MOVIE__S__Fight Club.mkv
@@ -519,7 +542,9 @@ series/season-01/episode-02.mp4             ../library/organized/1399__S__SERIES
 The preview must show:
 
 - the destination folder;
+- the selected operation (`Copy` or `Move`) and whether source files are kept;
 - the total number of files;
+- the total number of source bytes that will be copied or moved;
 - a relative source path for every file;
 - a relative destination path for every file;
 - the TMDB ID;
@@ -538,12 +563,13 @@ remain visible.
 If there is a validation error or conflict, confirmation of the plan must not be
 allowed until the issue is corrected or the group is canceled.
 
-### 9. Confirmation and result
+### 10. Confirmation and result
 
-The final prompt must be explicit, for example:
+The final prompt must be explicit and must name the selected operation, for
+example:
 
 ```text
-Move and rename 3 files? [y/N]
+Copy and rename 3 files? [y/N]
 ```
 
 The default must be do not execute (N).
@@ -558,8 +584,9 @@ If the user declines:
 If the user confirms:
 
 - execute only the plan that was displayed;
-- show progress per file;
-- report success or failure for each move;
+- show one aggregate progress bar whose percentage is the bytes copied or
+  logically moved divided by the total bytes in the plan;
+- report success or failure for each copy or move;
 - display totals at the end.
 
 ## Modern CLI Experience
@@ -594,8 +621,8 @@ The terminal UI should include, where supported by the chosen interaction
 library:
 
 - a small branded header containing the application name and version;
-- a visible step indicator such as Configuration, Destination, Sources,
-  Metadata, Preview, and Execute;
+- a visible step indicator such as Configuration, Operation, Destination,
+  Sources, Metadata, Preview, and Execute;
 - clear section titles;
 - consistent success, warning, error, and informational styles;
 - aligned tables or panels for source and destination paths;
@@ -633,11 +660,12 @@ Interactive controls should support:
 - helpful empty states;
 - retry for recoverable network or input errors;
 - non-blocking-looking feedback during network requests;
-- progress feedback during large file operations.
+- a byte-based progress bar during file operations, showing the percentage of
+  the total plan bytes already copied or moved.
 
-The UI must never appear frozen during a network request. A spinner or status
-line should explain whether it is searching, loading details, validating an
-episode, or preparing the move plan.
+The UI must never appear frozen during a network request or file transfer. A
+spinner or status line should explain whether it is searching, loading details,
+validating an episode, preparing the plan, copying, or moving.
 
 ### English interface
 
@@ -675,7 +703,8 @@ The interface must remain usable in small and large terminals:
 The CLI should feel fast even when the work is not instantaneous:
 
 - show immediate feedback after each action;
-- use a progress indicator for network and file operations;
+- use a spinner for network operations and a byte-based progress bar for file
+  operations;
 - reuse the TMDB HTTP client;
 - use bounded requests and bounded retries;
 - avoid rescanning a folder unnecessarily;
@@ -896,8 +925,8 @@ other types must not appear as identification options.
   authoritative.
 
 A network failure during identification must leave the source file untouched.
-The application must not move a file without being able to build and validate
-its final name.
+The application must not copy or move a file without being able to build and
+validate its final name.
 
 ### Attribution
 
@@ -907,16 +936,29 @@ are listed in the [References](#references) section.
 
 ## File and Safety Rules
 
-### The operation is a move
+### The operation is an explicit copy or move
 
-The expected result is:
+The user chooses the operation before destination and media selection. The
+selected mode is part of the immutable plan and cannot change between preview
+and execution.
+
+For a copy, the expected result is:
+
+```text
+source file --(copy + rename)--> destination file
+```
+
+The source file must remain present and unchanged. The destination must be an
+independent copy, not a hard link or another alias of the source.
+
+For a move, the expected result is:
 
 ```text
 source file --(move + rename)--> destination file
 ```
 
-After a successful operation, the original file must no longer remain in the
-source folder. The video contents must not be re-encoded or modified.
+After a successful move, the original file must no longer remain in the source
+folder. In both modes, the video contents must not be re-encoded or modified.
 
 ### Mandatory pre-validation
 
@@ -936,18 +978,25 @@ Before confirmation, validate every item:
 - all series season/episode combinations are valid;
 - no path exceeds relevant operating-system limits.
 
-If pre-validation fails, do not move any file in that plan.
+If pre-validation fails, do not copy or move any file in that plan.
 
-### Moving between volumes
+### Safe copy and move execution
 
-When the source and destination are on the same filesystem, prefer an atomic
-rename/move operation.
+Copy operations always write source bytes to a destination-side temporary file,
+verify the copy, and publish it with no-replace behavior. They must never remove
+or mutate the source, regardless of whether source and destination are on the
+same volume.
 
-When they are on different volumes, the implementation must:
+Move operations on the same filesystem may use the safe no-replace hard-link
+publication currently implemented by the adapter, followed by source removal
+only after revalidation. This is a logical move and therefore reports the
+file's bytes as complete when the operation succeeds.
+
+When a move crosses volumes, the implementation must:
 
 1. copy to a temporary file inside the destination folder;
 2. verify that the copy completed;
-3. rename the temporary file to the final name;
+3. publish the temporary file under the final name with no-replace behavior;
 4. remove the original file only afterward;
 5. remove the temporary file if any step fails.
 
@@ -955,33 +1004,50 @@ The temporary file must never appear under the final name before the copy is
 ready. If the copy cannot be verified, preserve the source and report the
 failure.
 
-The current filesystem adapter implements same-volume publication with a
-no-replace hard link followed by source removal. Automatic execution uses the
-cross-volume temporary-copy path when the operating system reports a
-cross-device error. If the host filesystem cannot provide the required
-no-replace primitive, the operation fails closed instead of falling back to an
-overwriting rename.
+The current filesystem adapter uses the same destination-side temporary-copy
+and verification path for explicit copies and cross-volume move fallbacks.
+Automatic move execution uses the cross-volume path when the operating system
+reports a cross-device error. If the host filesystem cannot provide the
+required no-replace primitive, the operation fails closed instead of falling
+back to an overwriting rename.
+
+### Byte-based progress
+
+After confirmation, calculate the total source bytes in the immutable plan. The
+progress bar must report:
+
+```text
+percentage = completed_or_transferred_bytes / total_plan_bytes * 100
+```
+
+For copies and cross-volume moves, update the bar while bytes are written to
+the temporary destination file. For same-volume moves, update the bar when each
+no-replace move completes because no byte copy occurs. The progress is
+aggregate across the complete plan, not merely a count of files, so a large
+file contributes proportionally more than a small file. A zero-byte file is
+treated as complete when its operation is successfully published.
 
 ### Failures during execution
 
 The complete plan must be pre-validated, but execution does not need to be
 transactional across volumes.
 
-If an unexpected failure occurs after some files have already moved:
+If an unexpected failure occurs after some files have already been processed:
 
-- stop new moves by default;
+- stop new copies or moves by default;
 - do not overwrite or delete destinations;
 - report which files completed, which failed, and which remain pending;
-- keep unprocessed files in the source;
+- keep unprocessed source files in place, and keep every source file in place
+  for copy operations;
 - allow a later execution to continue after the issue is fixed, treating
   existing destinations as conflicts.
 
 ### Cancellation
 
-Canceling at any prompt before confirmation causes no changes. During a move
-that has already started, the application must finish the current file operation
-or fail safely; it must not leave the source and destination in an ambiguous
-state without reporting it.
+Canceling at any prompt before confirmation causes no changes. During a copy or
+move that has already started, the application must finish the current file
+operation or fail safely; it must not leave the source and destination in an
+ambiguous state without reporting it.
 
 ## How to Retrieve the Data in the Future
 
@@ -1069,10 +1135,15 @@ Principles:
 
 - the interface layer collects choices and displays state;
 - the domain must not depend on prompts;
-- the TMDB client must not move files;
+- the selected `FileOperation` must remain in the plan from the first operation
+  prompt through execution and reporting;
+- the TMDB client must not copy or move files;
 - the filesystem adapter must not decide which title to use;
 - the filename generator must be deterministic and testable without a network;
-- the executor must perform only an already validated and confirmed plan;
+- the executor must perform only an already validated and confirmed copy-or-move
+  plan;
+- the filesystem adapter must expose transfer progress as aggregate byte counts,
+  not only file counts;
 - errors must be typed well enough to produce useful messages without exposing
   credentials.
 
@@ -1132,7 +1203,7 @@ title-tmdb-file/
 │   ├── domain.rs            # media, selection, and plan types
 │   ├── error.rs             # application errors
 │   ├── ui.rs                # renderer-neutral terminal interaction contracts
-│   ├── filesystem.rs        # discovery, validation, and safe movement
+│   ├── filesystem.rs        # discovery, validation, safe copy/move, and byte progress
 │   ├── naming.rs            # title normalization, filename generation, and parsing
 │   └── tmdb/
 │       ├── mod.rs
@@ -1271,6 +1342,8 @@ The MVP is complete only when all of the following criteria are met:
 - [x] Validate the API key and language before filesystem discovery.
 - [x] Start in the current directory without requiring a separate source-folder
       configuration.
+- [x] Ask whether the selected videos should be copied or moved before
+      destination and media selection.
 - [x] Ask for the destination after startup configuration and before scanning
       media.
 - [x] Recursively discover recognized video files from the current directory and
@@ -1300,12 +1373,16 @@ The MVP is complete only when all of the following criteria are met:
 - [x] Never overwrite an existing destination.
 - [x] Show a complete preview.
 - [x] Require explicit confirmation with a negative default.
-- [x] Move the file while keeping its contents intact.
+- [x] Copy files without modifying or removing their sources.
+- [x] Move files only after safe destination publication and source
+      revalidation.
+- [x] Show aggregate byte-based progress for both copying and moving.
 - [x] Preserve the source when an unverified cross-volume copy fails.
 - [x] Report success, failure, and pending items per file.
 - [x] Allow the ID, type, and episode to be recovered from the generated
       filename.
-- [x] Have automated tests for naming, parsing, validation, and safe movement.
+- [x] Have automated tests for naming, parsing, validation, safe copy/move
+      execution, and byte progress.
 
 ## Testing Strategy
 
@@ -1333,6 +1410,8 @@ Use temporary directories to verify:
 - exclusion of the destination subtree from the explorer;
 - collapsed/expanded tree construction and explicit file selection;
 - same-volume movement;
+- explicit copy mode with source preservation and independent destination data;
+- aggregate byte progress for copy and move execution;
 - existing-destination behavior;
 - source preservation on failure;
 - absence of overwrites.
@@ -1376,7 +1455,7 @@ The recommended task order and dependencies are documented in
 2. [TMDB configuration and identification](tasks/02-tmdb-configuration-and-identification.md)
 3. [Filesystem discovery and media selection](tasks/03-filesystem-discovery-and-media-selection.md)
 4. [Naming normalization and metadata recovery](tasks/04-naming-normalization-and-metadata-recovery.md)
-5. [Plan, preview, and safe file movement](tasks/05-plan-preview-and-safe-file-movement.md)
+5. [Plan, preview, and safe file operations](tasks/05-plan-preview-and-safe-file-movement.md)
 
 These task files are execution guidance derived from this README. They do not
 replace this product contract. If implementation reveals a necessary behavior
@@ -1412,13 +1491,17 @@ those phases.
 - [x] Implement ID confirmation.
 - [x] Implement details and episode validation.
 
-### Phase 3 — Plan and movement
+### Phase 3 — Plan and file operations
 
 - [x] Implement domain models.
 - [x] Implement sanitization and filename generation.
 - [x] Implement independent per-video TMDB identification during plan
       construction.
 - [x] Implement preview and conflict detection.
+- [x] Implement explicit copy-or-move selection and immutable operation-mode
+      planning.
+- [x] Implement independent destination copies that preserve source files.
+- [x] Implement aggregate byte-based transfer progress.
 - [x] Implement same-volume movement.
 - [x] Implement safe cross-volume copying.
 - [x] Implement the final report.

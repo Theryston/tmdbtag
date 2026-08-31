@@ -12,13 +12,13 @@ The product contract is defined by the root [README.md](../README.md). Engineeri
 | [02 — TMDB configuration and identification](02-tmdb-configuration-and-identification.md) | Per-user API-key configuration, metadata language, searches, manual IDs, details, and episode validation | 01 | 05 | Completed |
 | [03 — Filesystem discovery and media selection](03-filesystem-discovery-and-media-selection.md) | Source-root discovery, destination-subtree exclusion, one expandable multi-format video explorer, and relative path presentation | 01 | 05 | Completed |
 | [04 — Naming normalization and metadata recovery](04-naming-normalization-and-metadata-recovery.md) | Deterministic multi-format movie/series filenames, invalid-character handling, and parsing generated names | 01 | 05 | Completed |
-| [05 — Plan, preview, and safe movement](05-plan-preview-and-safe-file-movement.md) | End-to-end planning, conflict detection, confirmation, same-volume moves, cross-volume safety, and reporting | 01, 02, 03, 04 | None | Completed |
+| [05 — Plan, preview, and safe file operations](05-plan-preview-and-safe-file-movement.md) | End-to-end planning, copy-or-move selection, conflict detection, confirmation, safe publication, byte progress, and reporting | 01, 02, 03, 04 | None | Completed |
 
 ## Recommended sequence
 
 1. Complete Task 01 so the project has a stable command-line and terminal-interaction boundary.
 2. Complete Task 02, Task 03, and Task 04 in any order. They are separate capability slices and can be developed in parallel once their shared domain contracts are agreed.
-3. Complete Task 05 after the three capability slices are available. It is the only task allowed to connect the validated metadata, selected files, generated names, and filesystem mutation into the complete workflow.
+3. Complete Task 05 after the three capability slices are available. It is the only task allowed to connect the validated metadata, selected files, generated names, explicit copy-or-move selection, and filesystem mutation into the complete workflow.
 4. Run the full verification checklist from Task 05 and update the root documentation if implementation details intentionally diverge from the specification.
 
 ## Task conventions

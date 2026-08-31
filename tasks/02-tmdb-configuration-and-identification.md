@@ -31,7 +31,7 @@ uses the movie and TV endpoints separately, always sends the configured language
 
 The client tests use a local loopback HTTP server and do not require a real API key, network access,
 or live TMDB data. The normal application workflow intentionally stops after verified startup
-configuration until Tasks 03–05 connect source selection, naming, planning, and movement.
+configuration until Tasks 03–05 connect source selection, naming, planning, and copy/move execution.
 
 ## Required outcome
 

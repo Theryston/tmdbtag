@@ -12,7 +12,7 @@ together with one interactive explorer selection that determines what the later 
 process. The destination is chosen after startup TMDB configuration and before the source-root tree
 is scanned so the destination subtree can be excluded.
 
-This task reads and validates filesystem state. It must not rename or move media. It must also avoid accidentally traversing more of the filesystem than the product explicitly allows.
+This task reads and validates filesystem state. It must not rename, copy, or move media. It must also avoid accidentally traversing more of the filesystem than the product explicitly allows.
 
 ## Implementation delivered
 
@@ -26,7 +26,7 @@ The task is implemented across the following boundaries:
 
 The selection boundary is consumed by the complete organization workflow: after this task returns,
 the application runs a separate TMDB identification loop for every selected video before it builds
-the plan, previews it, and performs any confirmed movement.
+the plan, previews it, and performs any confirmed copy or movement.
 
 ## Required outcome
 

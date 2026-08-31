@@ -7,8 +7,8 @@ the title-tmdb-file repository.
 
 The project is a small Rust CLI that interactively selects video files,
 identifies each selected video as a movie or TV series through The Movie
-Database (TMDB), and moves the files to a destination with deterministic,
-metadata-bearing names.
+Database (TMDB), and copies or moves the files to a destination with
+deterministic, metadata-bearing names.
 
 This file is an implementation guide. The product behavior is defined by
 README.md. Agents must read both files before making a code change.
@@ -80,7 +80,8 @@ The complete documented interactive MVP workflow is implemented: command
 parsing, interactive terminal contracts, per-user configuration persistence,
 TMDB identification, non-mutating filesystem discovery and media selection,
 deterministic naming, typed plan construction, complete preview, pre-commit
-validation, safe movement, and per-file execution reporting are available.
+validation, safe copy/move execution with byte-based progress, and per-file
+execution reporting are available.
 Future retrieval commands, non-interactive modes, and auxiliary-file support
 remain intentionally out of scope.
 
@@ -201,15 +202,15 @@ does not determine the metadata for every file inside it.
 - Search results must distinguish movies from TV series.
 - Search must never silently accept the first result.
 - A manually entered numeric ID must be paired with a media type.
-- The selected item must be resolved and confirmed through TMDB before a move
-  plan is created.
+- The selected item must be resolved and confirmed through TMDB before a copy or
+  move plan is created.
 - A series episode must be validated against TMDB before the final preview.
 - TMDB data is the authority for the ID and title.
 - The API language is chosen during startup and defaults to pt-BR.
 - The application UI, help, prompts, errors, and progress text are always in
   English.
-- The application must not move a file if it cannot obtain and validate the
-  metadata required for its final name.
+- The application must not copy or move a file if it cannot obtain and validate
+  the metadata required for its final name.
 
 ### Naming
 
@@ -249,20 +250,28 @@ Naming rules:
   ID or episode numbers;
 - do not add arbitrary conflict suffixes such as (1).
 
-### Confirmation and movement
+### Confirmation and file operations
 
-- Build and validate the complete plan before any move.
+- Ask whether the user wants to copy or move before destination and media
+  selection, and retain that choice in the immutable plan.
+- Build and validate the complete plan before any copy or move.
 - Display every source and destination path before execution.
+- Display the total source-byte size that drives the progress percentage.
 - Use a negative default for the final confirmation.
 - A declined confirmation must produce no filesystem mutation.
 - Never overwrite an existing destination by default.
+- A copy must create independent destination data, leave the source untouched,
+  and use a destination-side temporary file, verification, and no-replace
+  publication.
 - A same-volume move should use an atomic or no-replace strategy where the
-  platform permits.
+  platform permits and remove the source only after successful publication.
 - A cross-volume move must copy to a destination-side temporary file, verify the
   copy, publish the final name, and delete the source only afterward.
-- If an unexpected move fails, stop by default and report completed, failed, and
-  pending items.
-- Preserve the source when a copy cannot be verified.
+- If an unexpected copy or move fails, stop by default and report completed,
+  failed, and pending items.
+- Report aggregate progress as completed or transferred source bytes divided by
+  the total source bytes in the plan.
+- Preserve every source when a copy cannot be verified.
 
 ## Engineering principles
 
@@ -293,8 +302,9 @@ Examples:
 - Use a numeric type for a TMDB ID instead of storing an unchecked ID string.
 - Use a dedicated episode value containing season and episode numbers.
 - Use Path and PathBuf for filesystem paths instead of concatenated strings.
-- Use a move-plan item containing source, destination, and verified metadata
-  rather than recomputing names during execution.
+- Use a plan item containing the selected copy-or-move operation, source,
+  destination, and verified metadata rather than recomputing names during
+  execution.
 
 Validation belongs at boundaries. Once a value enters the domain layer, it
 should already satisfy the invariants expected by that layer.
@@ -618,10 +628,10 @@ It should:
 - map the final result to an exit code;
 - print only final top-level errors that were not already rendered by the CLI;
 - avoid containing business rules;
-- avoid performing file moves directly.
+- avoid performing file copies or moves directly.
 
 Do not put the complete prompt flow in main.rs. Do not make main.rs responsible
-for parsing TMDB JSON, normalizing titles, or moving files.
+for parsing TMDB JSON, normalizing titles, or copying or moving files.
 
 ### app.rs
 
@@ -632,16 +642,17 @@ It should coordinate:
 1. loading the per-user TMDB configuration and collecting only missing fields;
 2. TMDB configuration validation;
 3. current-directory discovery;
-4. destination selection;
-5. one recursive video discovery from the current directory with
+4. operation selection (`Copy` or `Move`);
+5. destination selection;
+6. one recursive video discovery from the current directory with
    destination-subtree exclusion;
-6. one unified expandable video-file selection;
-7. TMDB identification;
-8. series episode input;
-9. plan construction;
-10. full validation;
-11. preview and confirmation;
-12. execution and final reporting.
+7. one unified expandable video-file selection;
+8. TMDB identification;
+9. series episode input;
+10. plan construction;
+11. full validation;
+12. preview and confirmation;
+13. copy or move execution and final reporting.
 
 It should depend on abstractions or focused modules, not on terminal-specific
 implementation details.
@@ -662,9 +673,11 @@ It should:
 - render the interactive wizard through a dedicated terminal UI adapter;
 - collect text, masked secrets, language choices, single-choice,
   multiple-choice, confirmation, and numeric input;
+- collect the explicit copy-or-move operation choice;
 - render the debounced live TMDB query/result selector while receiving search
   behavior through an application-supplied callback;
-- show step indicators, progress, previews, warnings, errors, and reports;
+- show step indicators, byte-based transfer progress, previews, warnings, errors,
+  and reports;
 - translate typed application results into consistent English user-facing
   messages;
 - expose cancellation as a normal control-flow result;
@@ -682,6 +695,7 @@ The CLI layer must not:
 - construct final filenames;
 - parse TMDB response JSON;
 - call std::fs::rename directly;
+- call copy, hard-link, delete, or other filesystem mutation APIs directly;
 - decide whether a destination conflict is safe;
 - silently choose a search result;
 - log credentials.
@@ -752,6 +766,7 @@ Expected concepts include:
 
 ```text
 MediaType
+FileOperation
 TmdbMedia
 EpisodeRef
 SourceRoot
@@ -763,6 +778,7 @@ FilesystemSelection
 FileSnapshot
 PlannedOperation
 OperationPlan
+TransferProgress
 OperationStatus
 OperationResult
 ExecutionReport
@@ -842,8 +858,11 @@ It should provide focused operations such as:
 - retain exact source paths for the UI's unified explorer and later plan
   revalidation;
 - validate a plan;
+- execute an explicit source-preserving copy through a destination-side
+  temporary file, verification, and no-replace publication;
 - execute a safe same-volume move;
-- execute a safe cross-volume move;
+- execute a safe cross-volume move fallback;
+- report aggregate transfer progress as completed bytes and total plan bytes;
 - produce per-file results.
 
 The filesystem layer should not:
@@ -881,7 +900,7 @@ It must not:
 
 - perform network calls;
 - inspect directories;
-- move files;
+- copy or move files;
 - read environment variables;
 - make UI decisions.
 
@@ -908,7 +927,7 @@ It should:
 The client must not:
 
 - prompt the user;
-- move files;
+- copy or move files;
 - generate final filenames;
 - decide which search result the user intended.
 
@@ -971,6 +990,8 @@ The following invariants must be enforced by code, not left as comments.
 
 ### Plan integrity
 
+- Every plan has exactly one explicit `FileOperation` (`Copy` or `Move`), and
+  execution must use that stored value rather than infer it later.
 - Every plan item has one source and one destination.
 - Every plan item has verified media metadata.
 - Every destination is unique within the plan.
@@ -1160,24 +1181,26 @@ For a normal interactive invocation, the exact high-level order is:
 6. the application saves a complete configuration when missing fields were
    collected;
 7. the application obtains and validates the current working directory;
-8. the UI asks for the destination;
-9. the filesystem layer recursively discovers recognized videos from the current
+8. the UI asks whether to copy or move;
+9. the UI asks for the destination;
+10. the filesystem layer recursively discovers recognized videos from the current
    directory and excludes the destination subtree;
-10. the UI presents one collapsed-by-default expandable explorer and collects
-    selected video files;
-11. the UI runs the identification loop for every selected video file;
-12. the UI collects season and episode for each file identified as a series;
-13. the application builds and validates the complete plan;
-14. the UI displays the complete preview;
-15. the UI asks for explicit confirmation;
-16. the executor performs the approved plan and the UI shows the final report.
+11. the UI presents one collapsed-by-default expandable explorer and collects
+   selected video files;
+12. the UI runs the identification loop for every selected video file;
+13. the UI collects season and episode for each file identified as a series;
+14. the application builds and validates the complete plan;
+15. the UI displays the complete preview, including total source bytes;
+16. the UI asks for explicit confirmation;
+17. the executor performs the approved copy or move and the UI shows byte
+    progress and the final report.
 
 When both configuration fields are missing, the API-key and language questions
 happen in that order before destination or media discovery. If the configuration
 file is complete, neither question is shown. The `config` command follows a
 separate, explicit order: clap parses the command, the UI opens both shared
 configuration prompts, the application validates and saves them, and the command
-exits without discovering or moving media. The only earlier user-visible paths
+exits without discovering, copying, or moving media. The only earlier user-visible paths
 are clap's --help, --version, command help, and invalid-argument handling.
 
 ### Interactive UI boundary
@@ -1195,6 +1218,7 @@ trait InteractiveUi {
         &mut self,
         default_language: &str,
     ) -> Result<String, UiError>;
+    fn choose_file_operation(&mut self) -> Result<FileOperation, UiError>;
     fn ask_destination(&mut self, initial: &Path) -> Result<PathBuf, UiError>;
     fn select_video_files(
         &mut self,
@@ -1202,7 +1226,7 @@ trait InteractiveUi {
         files: &[VideoFile],
     ) -> Result<Vec<usize>, UiError>;
     // Additional operations for search, episode input, preview,
-    // confirmation, progress, and reporting.
+    // confirmation, byte-based progress, and reporting.
 }
 ```
 
@@ -1259,7 +1283,8 @@ Provide, where supported by the selected terminal UI library:
 - clear selection counts;
 - aligned source/destination preview tables;
 - distinct success, warning, error, and informational styles;
-- progress feedback for network requests and file operations;
+- a determinate aggregate byte-progress bar for file copies and moves, plus
+  status feedback for network requests;
 - clear retry, back, and cancel actions;
 - useful empty states;
 - a concise final summary.
@@ -1281,6 +1306,8 @@ safety-critical information.
 - do not make network requests appear to freeze the terminal;
 - use a spinner or status line for search, detail loading, episode validation,
   and plan preparation;
+- use a determinate progress bar for file operations whose percentage is based
+  on completed or transferred bytes divided by total plan bytes;
 - keep prompts consistent so users can learn the interaction model.
 
 All application-owned CLI text must be in English, including clap help, prompt
@@ -1295,17 +1322,17 @@ Before confirmation:
 
 - do not create the destination;
 - do not rename anything;
-- do not move anything;
+- do not copy or move anything;
 - do not delete anything;
 - return a canceled result that maps to exit code 0.
 
-The UI must never call the move executor from a selection callback. The executor
-may run only after the plan has been validated, displayed, and explicitly
-confirmed.
+The UI must never call the copy/move executor from a selection callback. The
+executor may run only after the plan has been validated, displayed, and
+explicitly confirmed.
 
 During execution:
 
-- do not pretend a UI cancellation can undo a completed move;
+- do not pretend a UI cancellation can undo a completed copy or move;
 - finish or safely abort the current low-level operation where possible;
 - report the exact state of the affected file;
 - stop new operations by default if continuing would make the result less
@@ -1396,10 +1423,10 @@ Plan validation should verify:
 Revalidate as close as practical to commit because directory state can change
 after preview.
 
-### No-overwrite movement
+### No-overwrite publication
 
 A preflight check alone is not a complete no-overwrite guarantee because another
-process can create the destination between the check and the move.
+process can create the destination between the check and the copy or move.
 
 Use the strongest no-replace primitive available on the target platform. If the
 chosen Rust abstraction cannot guarantee no replacement:
@@ -1413,9 +1440,31 @@ chosen Rust abstraction cannot guarantee no replacement:
 Never silently replace a file merely because the operating system's default
 rename semantics allow it.
 
+### Explicit copies
+
+An explicit copy is source-preserving, including when the source and destination
+are on the same volume. It must create independent destination data rather than
+an alias such as a hard link.
+
+Required sequence:
+
+1. ensure the destination directory exists only at the approved commit point;
+2. create a uniquely named temporary file inside the destination directory;
+3. stream the source bytes into the temporary file while reporting aggregate
+   progress;
+4. flush or close the temporary file according to the durability policy;
+5. verify the copy against the selected source snapshot;
+6. publish the temporary file under the final name with no-replace behavior;
+7. preserve the source file and remove temporary artifacts after success or
+   failure where safe.
+
+Never implement an explicit copy as a hard link or as a move followed by a
+recreated source. If verification or publication fails, the source must remain
+untouched.
+
 ### Same-volume moves
 
-Same-volume movement should avoid unnecessary copying.
+Same-volume Move operations should avoid unnecessary copying.
 
 Requirements:
 
@@ -1424,6 +1473,7 @@ Requirements:
 - avoid destination replacement;
 - remove the source only after the destination is known to represent the same
   file;
+- report the source file's bytes as complete only after publication succeeds;
 - return a typed error if the operation cannot be completed safely.
 
 Do not assume std::fs::rename has no-replace semantics on every operating
@@ -1439,13 +1489,16 @@ overwriting rename.
 
 ### Cross-volume moves
 
-Cross-volume movement is a copy followed by source removal.
+Cross-volume Move operations are a copy followed by source removal. The same
+destination-side temporary-copy path is also used for explicit Copy operations,
+except that Copy never removes the source.
 
 Required sequence:
 
 1. ensure the destination directory exists only at the approved commit point;
 2. create a uniquely named temporary file inside the destination directory;
 3. copy the source bytes to the temporary file;
+   report each successful chunk through the aggregate byte-progress callback;
 4. flush or close the temporary file as required by the chosen durability
    policy;
 5. verify the copy using at least a reliable size check and, when required by
@@ -1462,6 +1515,22 @@ where safe.
 If verification fails, the source must remain. If publication succeeds but
 source removal fails, report a partial result rather than pretending the
 operation was a normal move.
+
+### Transfer progress
+
+The executor must expose a presentation-only progress callback with enough data
+to render one aggregate determinate bar. The percentage is based on source
+bytes, not file count:
+
+```text
+completed_bytes / total_plan_bytes * 100
+```
+
+For copies and cross-volume moves, emit updates as bytes are written to the
+temporary destination. For same-volume moves, emit a completed update after the
+no-replace publication succeeds because no byte stream is copied. Clamp values
+to the plan total and treat a successfully published zero-byte file as complete.
+The callback must not authorize, reorder, retry, or mutate an operation.
 
 ### Directory creation
 
@@ -1666,6 +1735,9 @@ Use temporary directories for:
 - destination exclusion;
 - destination creation after confirmation;
 - same-volume movement;
+- explicit copy preserving the source and producing independent destination
+  data;
+- aggregate byte progress for copying and moving;
 - existing-destination conflicts;
 - cancellation with no changes;
 - source preservation after failures;
@@ -1718,7 +1790,8 @@ Cover at least:
 - search result explicitly selected;
 - manual ID with explicit media type;
 - preview differs after correction and must be reconfirmed;
-- preflight conflict blocks all moves;
+- preflight conflict blocks all file operations;
+- operation selection is retained through preview and execution;
 - unexpected failure stops remaining work and reports partial state.
 
 ### Test naming
@@ -1888,7 +1961,7 @@ Suggested change categories:
 - domain and validation;
 - pure filename logic;
 - filesystem discovery;
-- safe movement;
+- safe copy/move operations;
 - TMDB transport;
 - CLI integration;
 - tests and fixtures.
@@ -2109,9 +2182,11 @@ This step should not need a network or terminal.
 
 ### Step 7: implement safe movement
 
+- implement explicit source-preserving copy with independent destination data;
 - implement same-volume no-replace movement;
 - implement cross-volume temp-copy movement;
 - verify copy before source removal;
+- emit aggregate byte progress during copies and logical completion for moves;
 - produce per-file execution results;
 - test failures and partial execution.
 
@@ -2147,8 +2222,10 @@ A change is done only when all applicable conditions are true:
 
 - No destination is overwritten.
 - Cancellation before confirmation produces no mutation.
-- Source files are preserved when a move cannot be verified.
+- Copy operations preserve every source file, including when verification fails.
+- Move operations preserve the source until destination publication is verified.
 - Cross-volume operations use destination-side temporary files.
+- Copy and move progress is reported from aggregate byte counts, not file count.
 - Secrets are not exposed.
 - Titles cannot escape the destination path.
 
@@ -2180,7 +2257,7 @@ Do not:
 - infer season and episode when the MVP requires manual input;
 - select the first TMDB search result automatically;
 - accept a numeric ID without a media type;
-- call an API after moving a file to discover whether the title was valid;
+- call an API after copying or moving a file to discover whether the title was valid;
 - create the destination merely because the user typed it;
 - call std::fs::rename without considering overwrite semantics;
 - delete the source before a cross-volume copy is verified;

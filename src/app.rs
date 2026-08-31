@@ -6,8 +6,8 @@ use std::{
 use crate::{
     config::{ConfigPromptMode, ConfigStore, StartupConfig, configure_interactively},
     domain::{
-        EpisodeRef, FilesystemSelection, IdentificationMethod, OperationPlan, PlannedOperation,
-        RunOutcome, SelectedSource, SourceFolder, SourceRoot, TmdbId, TmdbItem,
+        EpisodeRef, FileOperation, FilesystemSelection, IdentificationMethod, OperationPlan,
+        PlannedOperation, RunOutcome, SelectedSource, SourceFolder, SourceRoot, TmdbId, TmdbItem,
         TmdbSearchCandidate,
     },
     error::{AppError, AppResult, PlanningError, TmdbError, UiError},
@@ -249,8 +249,25 @@ fn collect_filesystem_selection_from_root<U: InteractiveUi>(
         ),
     )?;
 
+    ui.show_step(1, 6, "Choose the file operation")?;
+    let Some(operation) = ui.choose_file_operation()? else {
+        return Ok(None);
+    };
+    ui.show_message(
+        MessageLevel::Info,
+        &format!(
+            "Operation: {} ({}).",
+            operation.label(),
+            if operation.preserves_source() {
+                "original files will be kept"
+            } else {
+                "original files will be removed after successful publication"
+            }
+        ),
+    )?;
+
     'destination: loop {
-        ui.show_step(1, 5, "Choose the destination folder")?;
+        ui.show_step(2, 6, "Choose the destination folder")?;
         let Some(raw_destination) = ui.ask_destination_path()? else {
             return Ok(None);
         };
@@ -307,7 +324,7 @@ fn collect_filesystem_selection_from_root<U: InteractiveUi>(
         }
 
         loop {
-            ui.show_step(2, 5, "Select video files")?;
+            ui.show_step(3, 6, "Select video files")?;
             let Some(file_indices) = ui.select_video_files(&source_root, videos.items())? else {
                 return Ok(None);
             };
@@ -349,6 +366,7 @@ fn collect_filesystem_selection_from_root<U: InteractiveUi>(
             return Ok(Some(FilesystemSelection::new(
                 source_root,
                 destination,
+                operation,
                 selected_sources,
             )));
         }
@@ -433,7 +451,7 @@ where
     U: InteractiveUi + TmdbInteraction,
     C: TmdbProvider,
 {
-    ui.show_step(3, 5, "Identify media and validate episodes")?;
+    ui.show_step(4, 6, "Identify media and validate episodes")?;
     let Some(plan) = build_operation_plan(ui, selection, client)? else {
         ui.show_message(
             MessageLevel::Info,
@@ -442,12 +460,16 @@ where
         return Ok(RunOutcome::Cancelled);
     };
 
-    ui.show_step(4, 5, "Review and validate the operation plan")?;
-    filesystem::validate_move_plan(&plan)?;
+    ui.show_step(5, 6, "Review and validate the operation plan")?;
+    filesystem::validate_operation_plan(&plan)?;
     ui.show_plan_preview(&plan)?;
 
     let Some(confirmed) = ui.confirm(
-        &format!("Move and rename {} files?", plan.operation_count()),
+        &format!(
+            "{} and rename {} files?",
+            plan.operation().label(),
+            plan.operation_count()
+        ),
         false,
     )?
     else {
@@ -465,29 +487,56 @@ where
         return Ok(RunOutcome::Cancelled);
     }
 
-    ui.show_step(5, 5, "Move and rename files")?;
-    let activity = ui.start_activity("Moving and renaming files...")?;
+    let operation = plan.operation();
+    ui.show_step(6, 6, &format!("{} and rename files", operation.label()))?;
+    let activity = ui.start_activity(&format!(
+        "{} and renaming files...",
+        match operation {
+            FileOperation::Copy => "Copying",
+            FileOperation::Move => "Moving",
+        }
+    ))?;
+    activity.set_progress(0, plan.total_size_bytes());
     let total = plan.operation_count();
     let source_root = plan.source_root().path();
-    let execution = filesystem::execute_move_plan_with_progress(&plan, |index, operation| {
+    let execution = filesystem::execute_operation_plan_with_progress(&plan, |progress| {
+        let index = progress.operation_index();
+        let operation = &plan.operations()[index];
         activity.set_message(&format!(
-            "Moving file {}/{}: {}",
+            "{} file {}/{}: {}",
+            match plan.operation() {
+                FileOperation::Copy => "Copying",
+                FileOperation::Move => "Moving",
+            },
             index + 1,
             total,
             display_relative_path(operation.source_path(), source_root)
         ));
+        activity.set_progress(progress.completed_bytes(), progress.total_bytes());
     });
     let report = match execution {
         Ok(report) => report,
         Err(error) => {
-            activity.finish_error("File movement could not start safely.");
+            activity.finish_error("The file operation could not start safely.");
             return Err(error.into());
         }
     };
     if report.is_success() {
-        activity.finish_success("All files moved successfully.");
+        activity.finish_success(&format!(
+            "All files {} successfully.",
+            match operation {
+                FileOperation::Copy => "copied",
+                FileOperation::Move => "moved",
+            }
+        ));
     } else {
-        activity.finish_error("File movement stopped before every file was completed.");
+        activity.finish_error(&format!(
+            "File {} stopped before every file was completed.",
+            match operation {
+                FileOperation::Copy => "copying",
+                FileOperation::Move => "movement",
+            }
+        ));
     }
     ui.show_execution_report(&report)?;
     if report.is_success() {
@@ -555,6 +604,7 @@ where
     Ok(Some(OperationPlan::new(
         selection.source_root().clone(),
         selection.destination().clone(),
+        selection.operation(),
         operations,
     )))
 }
@@ -836,7 +886,10 @@ mod tests {
 
     use super::*;
     use crate::{
-        domain::{DestinationSelection, ExecutionReport, MediaType, OperationPlan, TmdbEpisode},
+        domain::{
+            DestinationSelection, ExecutionReport, FileOperation, MediaType, OperationPlan,
+            TmdbEpisode,
+        },
         error::{TmdbError, UiResult},
         ui::{MessageLevel, ProgressOutput},
     };
@@ -846,6 +899,8 @@ mod tests {
 
     impl ProgressOutput for NoopProgress {
         fn set_message(&self, _message: &str) {}
+
+        fn set_progress(&self, _completed_bytes: u64, _total_bytes: u64) {}
 
         fn finish_success(&self, _message: &str) {}
 
@@ -858,6 +913,7 @@ mod tests {
         cancel_on_secret: bool,
         cancel_on_language: bool,
         destination_input: Option<String>,
+        file_operations: Vec<Option<FileOperation>>,
         select_many_responses: Vec<Option<Vec<usize>>>,
         confirm_responses: Vec<Option<bool>>,
         identification_methods: Vec<Option<IdentificationMethod>>,
@@ -878,6 +934,14 @@ mod tests {
         fn show_step(&mut self, current: usize, total: usize, label: &str) -> UiResult<()> {
             self.events.push(format!("step:{current}/{total}:{label}"));
             Ok(())
+        }
+
+        fn choose_file_operation(&mut self) -> UiResult<Option<FileOperation>> {
+            Ok(if self.file_operations.is_empty() {
+                Some(FileOperation::Move)
+            } else {
+                self.file_operations.remove(0)
+            })
         }
 
         fn show_file_context(
@@ -1183,6 +1247,22 @@ mod tests {
         destination_exists: bool,
         sources: Vec<SelectedSource>,
     ) -> FilesystemSelection {
+        filesystem_selection_with_operation(
+            source_root,
+            destination,
+            destination_exists,
+            FileOperation::Move,
+            sources,
+        )
+    }
+
+    fn filesystem_selection_with_operation(
+        source_root: &std::path::Path,
+        destination: &std::path::Path,
+        destination_exists: bool,
+        operation: FileOperation,
+        sources: Vec<SelectedSource>,
+    ) -> FilesystemSelection {
         FilesystemSelection::new(
             SourceRoot::new(source_root.to_owned()),
             DestinationSelection::new(
@@ -1190,6 +1270,7 @@ mod tests {
                 destination_exists,
                 !destination_exists,
             ),
+            operation,
             sources,
         )
     }
@@ -1324,6 +1405,48 @@ mod tests {
             "movie contents"
         );
         assert!(ui.events.iter().any(|event| event == "preview:1"));
+        assert!(ui.events.iter().any(|event| event == "report:1:0:0"));
+    }
+
+    #[test]
+    fn a_confirmed_movie_can_be_copied_without_removing_the_source() {
+        let directory = tempdir().unwrap();
+        let source_folder = directory.path().join("movies");
+        let destination = directory.path().join("organized");
+        let source_file = source_folder.join("movie.MP4");
+        fs::create_dir(&source_folder).unwrap();
+        fs::write(&source_file, "movie contents").unwrap();
+
+        let client = FakeTmdbProvider {
+            items: vec![movie_item(550, "Mission: Impossible")],
+            ..FakeTmdbProvider::default()
+        };
+        let mut ui = manual_identification_ui(MediaType::Movie, 550, Some(true));
+        let selection = filesystem_selection_with_operation(
+            directory.path(),
+            &destination,
+            false,
+            FileOperation::Copy,
+            vec![SelectedSource::new(
+                source_folder.clone(),
+                vec![source_file.clone()],
+            )],
+        );
+
+        let outcome = organize_selection(&mut ui, &selection, &client).unwrap();
+
+        assert_eq!(outcome, RunOutcome::Completed);
+        assert!(source_file.exists());
+        assert_eq!(
+            fs::read_to_string(destination.join("550__S__MOVIE__S__Mission - Impossible.mp4"),)
+                .unwrap(),
+            "movie contents"
+        );
+        assert!(
+            ui.events
+                .iter()
+                .any(|event| event == "confirm:Copy and rename 1 files?")
+        );
         assert!(ui.events.iter().any(|event| event == "report:1:0:0"));
     }
 
@@ -1813,6 +1936,7 @@ mod tests {
 
         let mut ui = RecordingUi {
             destination_input: Some("organized".to_owned()),
+            file_operations: vec![Some(FileOperation::Copy)],
             select_many_responses: vec![Some(vec![4, 3, 2, 1, 0])],
             ..RecordingUi::default()
         };
@@ -1825,6 +1949,7 @@ mod tests {
 
         assert_eq!(selection.source_root().path(), directory.path());
         assert_eq!(selection.destination().path(), destination);
+        assert_eq!(selection.operation(), FileOperation::Copy);
         assert_eq!(selection.sources().len(), 5);
         let selected_files = selection
             .sources()

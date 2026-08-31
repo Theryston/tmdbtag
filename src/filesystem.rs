@@ -2,21 +2,23 @@
 //!
 //! Discovery and plan construction remain non-mutating. Once the application has displayed and
 //! confirmed an immutable plan, this module owns the destination commit, no-replace publication,
-//! cross-volume copy verification, source removal, and per-file execution report.
+//! source-preserving copies, cross-volume copy verification, source removal for moves, and
+//! per-file execution reports.
 
 use std::{
     cmp::Ordering,
     env,
     fs::{self, File, OpenOptions},
-    io::{self, Write},
+    io::{self, Read, Write},
     path::{Component, Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering as AtomicOrdering},
 };
 
 use crate::{
     domain::{
-        DestinationSelection, ExecutionReport, FileSnapshot, OperationPlan, OperationResult,
-        OperationStatus, PlannedOperation, SourceFolder, SourceRoot, VideoExtension, VideoFile,
+        DestinationSelection, ExecutionReport, FileOperation, FileSnapshot, OperationPlan,
+        OperationResult, OperationStatus, PlannedOperation, SourceFolder, SourceRoot,
+        VideoExtension, VideoFile,
     },
     error::FilesystemError,
 };
@@ -60,6 +62,67 @@ impl<T> Discovery<T> {
 pub struct DiscoveryWarning {
     path: PathBuf,
     reason: String,
+}
+
+/// Aggregate byte progress for one confirmed file operation plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransferProgress {
+    operation_index: usize,
+    operation_count: usize,
+    completed_bytes: u64,
+    total_bytes: u64,
+    current_file_bytes: u64,
+    current_file_total: u64,
+}
+
+impl TransferProgress {
+    fn new(
+        operation_index: usize,
+        operation_count: usize,
+        completed_bytes: u64,
+        total_bytes: u64,
+        current_file_bytes: u64,
+        current_file_total: u64,
+    ) -> Self {
+        Self {
+            operation_index,
+            operation_count,
+            completed_bytes,
+            total_bytes,
+            current_file_bytes,
+            current_file_total,
+        }
+    }
+
+    /// Returns the zero-based index of the file currently being processed.
+    pub const fn operation_index(self) -> usize {
+        self.operation_index
+    }
+
+    /// Returns the number of files in the plan.
+    pub const fn operation_count(self) -> usize {
+        self.operation_count
+    }
+
+    /// Returns the aggregate bytes copied or logically moved so far.
+    pub const fn completed_bytes(self) -> u64 {
+        self.completed_bytes
+    }
+
+    /// Returns the aggregate bytes represented by the complete plan.
+    pub const fn total_bytes(self) -> u64 {
+        self.total_bytes
+    }
+
+    /// Returns the bytes transferred for the current file.
+    pub const fn current_file_bytes(self) -> u64 {
+        self.current_file_bytes
+    }
+
+    /// Returns the planned size of the current file.
+    pub const fn current_file_total(self) -> u64 {
+        self.current_file_total
+    }
 }
 
 impl DiscoveryWarning {
@@ -450,7 +513,7 @@ fn read_source_metadata(path: &Path) -> Result<fs::Metadata, FilesystemError> {
 }
 
 /// Validates every operation without changing the filesystem.
-pub fn validate_move_plan(plan: &OperationPlan) -> Result<(), FilesystemError> {
+pub fn validate_operation_plan(plan: &OperationPlan) -> Result<(), FilesystemError> {
     if plan.operations().is_empty() {
         return Err(FilesystemError::EmptyOperationPlan);
     }
@@ -498,27 +561,28 @@ pub fn validate_move_plan(plan: &OperationPlan) -> Result<(), FilesystemError> {
 }
 
 /// Executes a previously validated plan and returns one result for every planned file.
-pub fn execute_move_plan(plan: &OperationPlan) -> Result<ExecutionReport, FilesystemError> {
-    execute_move_plan_with_progress(plan, |_, _| {})
+pub fn execute_operation_plan(plan: &OperationPlan) -> Result<ExecutionReport, FilesystemError> {
+    execute_operation_plan_with_progress(plan, |_| {})
 }
 
-/// Executes a plan while notifying the caller immediately before each operation starts.
+/// Executes a plan while reporting aggregate byte-based transfer progress.
 ///
-/// The callback is presentation-only: it cannot change the plan or authorize a move. The
-/// filesystem layer still performs all validation and owns every mutation.
-pub fn execute_move_plan_with_progress<F>(
+/// The callback is presentation-only: it cannot change the plan or authorize an operation. The
+/// filesystem layer still performs all validation and owns every mutation. Copy operations always
+/// transfer bytes into a destination-side temporary file; move operations report logical byte
+/// completion for same-volume no-replace moves and byte progress for cross-volume fallbacks.
+pub fn execute_operation_plan_with_progress<F>(
     plan: &OperationPlan,
-    mut before_operation: F,
+    on_progress: F,
 ) -> Result<ExecutionReport, FilesystemError>
 where
-    F: FnMut(usize, &PlannedOperation),
+    F: FnMut(TransferProgress),
 {
-    validate_move_plan(plan)?;
-    let operations = plan.operations();
-    Ok(execute_validated_move_plan(
+    validate_operation_plan(plan)?;
+    Ok(execute_validated_operation_plan(
         plan,
-        MoveMode::Automatic,
-        |index| before_operation(index, &operations[index]),
+        MoveStrategy::Automatic,
+        on_progress,
     ))
 }
 
@@ -696,13 +760,13 @@ fn ensure_destination_writable(
     Ok(())
 }
 
-fn execute_validated_move_plan<F>(
+fn execute_validated_operation_plan<F>(
     plan: &OperationPlan,
-    mode: MoveMode,
-    mut before_operation: F,
+    strategy: MoveStrategy,
+    mut on_progress: F,
 ) -> ExecutionReport
 where
-    F: FnMut(usize),
+    F: FnMut(TransferProgress),
 {
     let mut statuses = vec![OperationStatus::Pending; plan.operation_count()];
     if let Err(error) = ensure_destination_at_commit(plan) {
@@ -712,8 +776,19 @@ where
         return report_for_statuses(plan, statuses);
     }
 
+    let total_bytes = plan.total_size_bytes();
+    let mut completed_bytes = 0_u64;
+
     for (index, operation) in plan.operations().iter().enumerate() {
-        before_operation(index);
+        let current_file_total = operation.source_snapshot().size_bytes();
+        on_progress(TransferProgress::new(
+            index,
+            plan.operation_count(),
+            completed_bytes,
+            total_bytes,
+            0,
+            current_file_total,
+        ));
 
         if let Err(error) = validate_operation_at_commit(plan, operation) {
             statuses[index] = OperationStatus::Failed {
@@ -722,8 +797,30 @@ where
             break;
         }
 
-        match move_operation(operation, mode) {
-            Ok(()) => statuses[index] = OperationStatus::Completed,
+        let execution_result = {
+            let mut transfer = TransferContext::new(
+                index,
+                plan.operation_count(),
+                completed_bytes,
+                total_bytes,
+                &mut on_progress,
+            );
+            execute_operation(operation, plan.operation(), strategy, &mut transfer)
+        };
+
+        match execution_result {
+            Ok(()) => {
+                completed_bytes = completed_bytes.saturating_add(current_file_total);
+                on_progress(TransferProgress::new(
+                    index,
+                    plan.operation_count(),
+                    completed_bytes,
+                    total_bytes,
+                    current_file_total,
+                    current_file_total,
+                ));
+                statuses[index] = OperationStatus::Completed;
+            }
             Err(error) => {
                 statuses[index] = OperationStatus::Failed {
                     reason: error.to_string(),
@@ -749,7 +846,7 @@ fn report_for_statuses(plan: &OperationPlan, statuses: Vec<OperationStatus>) -> 
             )
         })
         .collect();
-    ExecutionReport::new(plan.source_root().clone(), results)
+    ExecutionReport::new(plan.source_root().clone(), plan.operation(), results)
 }
 
 fn ensure_destination_at_commit(plan: &OperationPlan) -> Result<(), FilesystemError> {
@@ -811,7 +908,7 @@ fn validate_operation_at_commit(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MoveMode {
+enum MoveStrategy {
     Automatic,
     #[cfg(test)]
     SameVolume,
@@ -819,17 +916,69 @@ enum MoveMode {
     CrossVolume,
 }
 
-fn move_operation(operation: &PlannedOperation, mode: MoveMode) -> Result<(), FilesystemError> {
-    match mode {
-        MoveMode::Automatic => match move_same_volume(operation) {
-            Ok(()) => Ok(()),
-            Err(error) if is_cross_device_error(&error) => move_cross_volume(operation),
-            Err(error) => Err(error),
+struct TransferContext<'a> {
+    operation_index: usize,
+    operation_count: usize,
+    completed_bytes: u64,
+    total_bytes: u64,
+    on_progress: &'a mut dyn FnMut(TransferProgress),
+}
+
+impl<'a> TransferContext<'a> {
+    fn new(
+        operation_index: usize,
+        operation_count: usize,
+        completed_bytes: u64,
+        total_bytes: u64,
+        on_progress: &'a mut dyn FnMut(TransferProgress),
+    ) -> Self {
+        Self {
+            operation_index,
+            operation_count,
+            completed_bytes,
+            total_bytes,
+            on_progress,
+        }
+    }
+
+    fn report(&mut self, current_file_bytes: u64, current_file_total: u64) {
+        let current_file_bytes = current_file_bytes.min(current_file_total);
+        let completed_bytes = self
+            .completed_bytes
+            .saturating_add(current_file_bytes)
+            .min(self.total_bytes);
+        (self.on_progress)(TransferProgress::new(
+            self.operation_index,
+            self.operation_count,
+            completed_bytes,
+            self.total_bytes,
+            current_file_bytes,
+            current_file_total,
+        ));
+    }
+}
+
+fn execute_operation(
+    operation: &PlannedOperation,
+    file_operation: FileOperation,
+    strategy: MoveStrategy,
+    transfer: &mut TransferContext<'_>,
+) -> Result<(), FilesystemError> {
+    match file_operation {
+        FileOperation::Copy => copy_with_temporary_publish(operation, false, transfer),
+        FileOperation::Move => match strategy {
+            MoveStrategy::Automatic => match move_same_volume(operation) {
+                Ok(()) => Ok(()),
+                Err(error) if is_cross_device_error(&error) => {
+                    copy_with_temporary_publish(operation, true, transfer)
+                }
+                Err(error) => Err(error),
+            },
+            #[cfg(test)]
+            MoveStrategy::SameVolume => move_same_volume(operation),
+            #[cfg(test)]
+            MoveStrategy::CrossVolume => copy_with_temporary_publish(operation, true, transfer),
         },
-        #[cfg(test)]
-        MoveMode::SameVolume => move_same_volume(operation),
-        #[cfg(test)]
-        MoveMode::CrossVolume => move_cross_volume(operation),
     }
 }
 
@@ -857,7 +1006,11 @@ fn move_same_volume(operation: &PlannedOperation) -> Result<(), FilesystemError>
     }
 }
 
-fn move_cross_volume(operation: &PlannedOperation) -> Result<(), FilesystemError> {
+fn copy_with_temporary_publish(
+    operation: &PlannedOperation,
+    remove_source: bool,
+    transfer: &mut TransferContext<'_>,
+) -> Result<(), FilesystemError> {
     let destination_directory = operation.destination_path().parent().ok_or_else(|| {
         FilesystemError::DestinationEscapes {
             path: operation.destination_path().to_owned(),
@@ -872,7 +1025,13 @@ fn move_cross_volume(operation: &PlannedOperation) -> Result<(), FilesystemError
             }
         })?;
 
-    let copy_result = copy_and_publish_cross_volume(operation, &temporary_path, temporary_file);
+    let copy_result = copy_and_publish(
+        operation,
+        &temporary_path,
+        temporary_file,
+        remove_source,
+        transfer,
+    );
 
     if copy_result.is_err()
         && let Err(cleanup_cause) = fs::remove_file(&temporary_path)
@@ -887,10 +1046,12 @@ fn move_cross_volume(operation: &PlannedOperation) -> Result<(), FilesystemError
     copy_result
 }
 
-fn copy_and_publish_cross_volume(
+fn copy_and_publish(
     operation: &PlannedOperation,
     temporary_path: &Path,
     mut temporary_file: File,
+    remove_source: bool,
+    transfer: &mut TransferContext<'_>,
 ) -> Result<(), FilesystemError> {
     let mut source_file =
         File::open(operation.source_path()).map_err(|cause| FilesystemError::CrossVolumeCopy {
@@ -898,13 +1059,32 @@ fn copy_and_publish_cross_volume(
             destination: operation.destination_path().to_owned(),
             reason: format!("could not open the source: {cause}"),
         })?;
-    let copied_bytes = io::copy(&mut source_file, &mut temporary_file).map_err(|cause| {
-        FilesystemError::CrossVolumeCopy {
-            source_path: operation.source_path().to_owned(),
-            destination: operation.destination_path().to_owned(),
-            reason: format!("copy failed: {cause}"),
+    let source_size = operation.source_snapshot().size_bytes();
+    let mut copied_bytes = 0_u64;
+    let mut buffer = [0_u8; 1024 * 1024];
+    loop {
+        let bytes_read =
+            source_file
+                .read(&mut buffer)
+                .map_err(|cause| FilesystemError::CrossVolumeCopy {
+                    source_path: operation.source_path().to_owned(),
+                    destination: operation.destination_path().to_owned(),
+                    reason: format!("copy failed while reading the source: {cause}"),
+                })?;
+        if bytes_read == 0 {
+            break;
         }
-    })?;
+
+        temporary_file
+            .write_all(&buffer[..bytes_read])
+            .map_err(|cause| FilesystemError::CrossVolumeCopy {
+                source_path: operation.source_path().to_owned(),
+                destination: operation.destination_path().to_owned(),
+                reason: format!("copy failed while writing the destination: {cause}"),
+            })?;
+        copied_bytes = copied_bytes.saturating_add(bytes_read as u64);
+        transfer.report(copied_bytes, source_size);
+    }
     temporary_file
         .flush()
         .map_err(|cause| FilesystemError::CrossVolumeCopy {
@@ -964,10 +1144,15 @@ fn copy_and_publish_cross_volume(
         path: temporary_path.to_owned(),
         cause,
     })?;
-    fs::remove_file(operation.source_path()).map_err(|cause| FilesystemError::SourceRemoval {
-        path: operation.source_path().to_owned(),
-        cause,
-    })
+    if remove_source {
+        fs::remove_file(operation.source_path()).map_err(|cause| {
+            FilesystemError::SourceRemoval {
+                path: operation.source_path().to_owned(),
+                cause,
+            }
+        })?;
+    }
+    Ok(())
 }
 
 fn create_temporary_file(directory: &Path) -> io::Result<(PathBuf, File)> {
@@ -1202,6 +1387,22 @@ mod tests {
         destination_exists: bool,
         operations: Vec<PlannedOperation>,
     ) -> OperationPlan {
+        operation_plan_with_mode(
+            source_root_path,
+            destination,
+            destination_exists,
+            FileOperation::Move,
+            operations,
+        )
+    }
+
+    fn operation_plan_with_mode(
+        source_root_path: &Path,
+        destination: &Path,
+        destination_exists: bool,
+        mode: FileOperation,
+        operations: Vec<PlannedOperation>,
+    ) -> OperationPlan {
         OperationPlan::new(
             SourceRoot::new(source_root_path.to_owned()),
             DestinationSelection::new(
@@ -1209,6 +1410,7 @@ mod tests {
                 destination_exists,
                 !destination_exists,
             ),
+            mode,
             operations,
         )
     }
@@ -1546,7 +1748,10 @@ mod tests {
             )],
         );
 
-        let report = execute_validated_move_plan(&plan, MoveMode::SameVolume, |_| {});
+        let mut progress = Vec::new();
+        let report = execute_validated_operation_plan(&plan, MoveStrategy::SameVolume, |update| {
+            progress.push(update);
+        });
 
         assert!(report.is_success());
         assert!(!source.exists());
@@ -1554,6 +1759,58 @@ mod tests {
             fs::read_to_string(destination.join(final_name)).unwrap(),
             "video bytes"
         );
+        assert_eq!(progress.last().unwrap().completed_bytes(), 11);
+        assert_eq!(progress.last().unwrap().total_bytes(), 11);
+    }
+
+    #[test]
+    fn copy_execution_preserves_an_independent_source_and_reports_byte_progress() {
+        let directory = tempdir().unwrap();
+        let source_folder = directory.path().join("source");
+        let destination = directory.path().join("organized");
+        let source = source_folder.join("movie.MKV");
+        let final_name = "550__S__MOVIE__S__Fight Club.mkv";
+        fs::create_dir(&source_folder).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(&source, "copy operation bytes").unwrap();
+
+        let plan = operation_plan_with_mode(
+            directory.path(),
+            &destination,
+            true,
+            FileOperation::Copy,
+            vec![planned_operation(
+                &source_folder,
+                &source,
+                &destination,
+                final_name,
+            )],
+        );
+        validate_operation_plan(&plan).unwrap();
+
+        let mut progress = Vec::new();
+        let report = execute_operation_plan_with_progress(&plan, |update| {
+            progress.push(update);
+        })
+        .unwrap();
+
+        assert!(report.is_success());
+        assert!(source.exists());
+        assert_eq!(
+            fs::read_to_string(destination.join(final_name)).unwrap(),
+            "copy operation bytes"
+        );
+        fs::write(&source, "changed source").unwrap();
+        assert_eq!(
+            fs::read_to_string(destination.join(final_name)).unwrap(),
+            "copy operation bytes"
+        );
+        assert!(progress.iter().any(|update| {
+            update.current_file_bytes() > 0
+                && update.current_file_bytes() == update.current_file_total()
+        }));
+        assert_eq!(progress.last().unwrap().completed_bytes(), 20);
+        assert_eq!(progress.last().unwrap().total_bytes(), 20);
     }
 
     #[test]
@@ -1581,7 +1838,7 @@ mod tests {
             )],
         );
 
-        let error = validate_move_plan(&plan).unwrap_err();
+        let error = validate_operation_plan(&plan).unwrap_err();
 
         assert!(matches!(
             error,
@@ -1616,10 +1873,10 @@ mod tests {
             )],
         );
 
-        validate_move_plan(&plan).unwrap();
+        validate_operation_plan(&plan).unwrap();
         assert!(!destination.exists());
 
-        let report = execute_move_plan(&plan).unwrap();
+        let report = execute_operation_plan(&plan).unwrap();
 
         assert!(report.is_success());
         assert!(destination.is_dir());
@@ -1653,7 +1910,7 @@ mod tests {
         );
         fs::write(&source, "the source changed after selection").unwrap();
 
-        let error = validate_move_plan(&plan).unwrap_err();
+        let error = validate_operation_plan(&plan).unwrap_err();
 
         assert!(matches!(error, FilesystemError::SourceChanged { .. }));
         assert!(source.exists());
@@ -1683,7 +1940,7 @@ mod tests {
             ],
         );
 
-        let error = validate_move_plan(&plan).unwrap_err();
+        let error = validate_operation_plan(&plan).unwrap_err();
 
         assert!(matches!(
             error,
@@ -1715,9 +1972,9 @@ mod tests {
                 final_name,
             )],
         );
-        validate_move_plan(&plan).unwrap();
+        validate_operation_plan(&plan).unwrap();
 
-        let report = execute_validated_move_plan(&plan, MoveMode::CrossVolume, |_| {});
+        let report = execute_validated_operation_plan(&plan, MoveStrategy::CrossVolume, |_| {});
 
         assert!(report.is_success());
         assert!(!source.exists());
@@ -1752,7 +2009,15 @@ mod tests {
             FileSnapshot::new(snapshot.size_bytes() + 1, snapshot.modified()),
         );
 
-        let error = move_cross_volume(&operation).unwrap_err();
+        let mut progress = |_: TransferProgress| {};
+        let mut transfer = TransferContext::new(
+            0,
+            1,
+            0,
+            operation.source_snapshot().size_bytes(),
+            &mut progress,
+        );
+        let error = copy_with_temporary_publish(&operation, true, &mut transfer).unwrap_err();
 
         assert!(matches!(error, FilesystemError::CopyVerification { .. }));
         assert!(source.exists());
@@ -1787,14 +2052,15 @@ mod tests {
             .map(|(source, name)| planned_operation(&source_folder, source, &destination, name))
             .collect();
         let plan = operation_plan(directory.path(), &destination, true, operations);
-        validate_move_plan(&plan).unwrap();
+        validate_operation_plan(&plan).unwrap();
         let late_conflict = plan.operations()[1].destination_path().to_owned();
 
-        let report = execute_validated_move_plan(&plan, MoveMode::SameVolume, |index| {
-            if index == 1 {
-                fs::write(&late_conflict, "late conflict").unwrap();
-            }
-        });
+        let report =
+            execute_validated_operation_plan(&plan, MoveStrategy::SameVolume, |progress| {
+                if progress.operation_index() == 1 {
+                    fs::write(&late_conflict, "late conflict").unwrap();
+                }
+            });
 
         assert_eq!(report.completed_count(), 1);
         assert_eq!(report.failed_count(), 1);
