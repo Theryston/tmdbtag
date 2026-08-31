@@ -100,7 +100,7 @@ Each displayed candidate should include, when available:
 Search behavior must:
 
 - keep the query and result list in one live interactive control;
-- debounce requests for approximately 300 ms after the last edit;
+- debounce requests for approximately 500 ms after the last edit;
 - avoid requests for empty queries and queries shorter than two non-whitespace characters;
 - clear stale results when the query changes;
 - support `Up`/`Down` result navigation, `Enter` selection, and `Escape` cancellation;

@@ -358,7 +358,7 @@ The search must open a live, keyboard-driven selector rather than a separate que
 by a second filter prompt. The selector must:
 
 - keep the query editable while the result list is visible;
-- start a search after the user stops typing for a short debounce interval of approximately 300 ms;
+- start a search after the user stops typing for a debounce interval of approximately 500 ms;
 - avoid sending a request for an empty query and avoid sending a request for fewer than two
   non-whitespace characters;
 - search both movies and TV series through the documented endpoints;
@@ -530,8 +530,7 @@ The terminal UI should include, where supported by the chosen interaction librar
 - a compact tree explorer with visible folder expand/collapse state;
 - an explicit keyboard hint for `Space` selection, `Tab` expansion/collapse, and `Enter` confirmation;
 - a single per-file context line showing the selected file's relative path and position;
-- replacement of the previous file's identification output before the next file begins, so only the
-  active file's logs remain visible;
+- preservation of each completed file's identification output as an execution history;
 - all TMDB search, selection, confirmation, and series episode prompts for one file grouped below
   that file's context line until its identification is complete;
 - a concise final summary;

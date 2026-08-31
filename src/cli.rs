@@ -28,7 +28,7 @@ use crate::{
 
 const MULTI_SELECT_SEARCH_THRESHOLD: usize = 10;
 const MEDIA_EXPLORER_RESERVED_LINES: usize = 6;
-const TMDB_LIVE_SEARCH_DEBOUNCE_MS: u64 = 300;
+const TMDB_LIVE_SEARCH_DEBOUNCE_MS: u64 = 500;
 const TMDB_LIVE_SEARCH_MIN_QUERY_CHARS: usize = 2;
 const TMDB_LIVE_SEARCH_IDLE_POLL: Duration = Duration::from_secs(60 * 60);
 const TMDB_LIVE_SEARCH_RESERVED_LINES: usize = 6;
@@ -73,8 +73,6 @@ pub fn execute(cli: Cli) -> AppResult<RunOutcome> {
 pub struct TerminalUi {
     terminal: dialoguer::console::Term,
     theme: ColorfulTheme,
-    file_flow_started: bool,
-    current_step: Option<String>,
 }
 
 #[derive(Debug)]
@@ -373,8 +371,6 @@ impl TerminalUi {
         Self {
             terminal: dialoguer::console::Term::stderr(),
             theme: ColorfulTheme::default(),
-            file_flow_started: false,
-            current_step: None,
         }
     }
 
@@ -806,7 +802,6 @@ impl InteractiveUi for TerminalUi {
             "{} Step {current}/{total} · {label}",
             dialoguer::console::style("›").cyan().bold()
         );
-        self.current_step = Some(line.clone());
         self.write_line(&line)
     }
 
@@ -817,17 +812,7 @@ impl InteractiveUi for TerminalUi {
         file_path: &Path,
         source_root: &Path,
     ) -> UiResult<()> {
-        if self.file_flow_started {
-            self.terminal.clear_screen().map_err(UiError::Prompt)?;
-            if let Some(step) = &self.current_step {
-                self.write_line(step)?;
-                self.write_line("")?;
-            }
-        } else {
-            self.write_line("")?;
-        }
-
-        self.file_flow_started = true;
+        self.write_line("")?;
         let relative_path = crate::ui::display_relative_path(file_path, source_root);
 
         self.write_line(&format!(

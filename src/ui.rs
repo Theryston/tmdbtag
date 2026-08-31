@@ -49,9 +49,8 @@ pub trait InteractiveUi {
     /// Shows the active file line before its metadata prompts.
     ///
     /// Every TMDB and episode prompt for that file is rendered after this call and before
-    /// `finish_file_context`, so a user can always tell which file is being processed. A concrete
-    /// terminal implementation may replace the previous file's visible output before rendering
-    /// the new line.
+    /// `finish_file_context`, so a user can always tell which file is being processed. Previous
+    /// file contexts and their logs remain visible as an execution history.
     fn show_file_context(
         &mut self,
         current_file: usize,
@@ -70,8 +69,8 @@ pub trait InteractiveUi {
 
     /// Ends the active file context without clearing its output.
     ///
-    /// The next `show_file_context` call is responsible for replacing the previous file's visible
-    /// identification output, which keeps the final file's result visible after the workflow ends.
+    /// The next `show_file_context` call appends a new context while preserving the previous
+    /// file's identification output and logs.
     fn finish_file_context(&mut self) -> UiResult<()> {
         Ok(())
     }

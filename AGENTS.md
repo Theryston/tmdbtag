@@ -889,7 +889,7 @@ The selected language comes from startup configuration and defaults to pt-BR. It
 - Preserve enough result information to build a detail request.
 - Use a live keyboard-driven query editor instead of a separate query prompt followed by a filter
   prompt.
-- Debounce live searches for approximately 300 ms after the last query edit.
+- Debounce live searches for approximately 500 ms after the last query edit.
 - Do not search an empty query or a query shorter than two non-whitespace characters.
 - Invalidate the visible candidate list whenever the query changes.
 - Allow `Up`/`Down` navigation and require `Enter` for explicit selection; `Escape` cancels.
@@ -1049,9 +1049,9 @@ prompt. The line must show the file position and a path relative to the source r
 must be truncated without splitting UTF-8 text, preferably from the left so the filename suffix
 remains visible. Every TMDB search, result selection, detail confirmation, episode prompt,
 validation message, and related progress status for that file must remain below that line. Before
-the next file begins, clear the previous file's visible identification output and show the next
-file's context line. This presentation rule must never replace the exact source `PathBuf` with its
-display label.
+the next file begins, append a new context line while preserving the previous file's visible
+identification output and logs. This presentation rule must never replace the exact source
+`PathBuf` with its display label.
 
 ### Modern terminal quality bar
 
@@ -1066,7 +1066,7 @@ Provide, where supported by the selected terminal UI library:
 - obvious selected/unselected states;
 - searchable or filterable long lists;
 - a single per-file context line showing its relative path and file position;
-- replacement of the previous file's identification output before the next file begins;
+- preservation of previous per-file identification output as a readable execution history;
 - grouping of the active file's TMDB and series-episode prompts/statuses below that line;
 - clear selection counts;
 - aligned source/destination preview tables;
