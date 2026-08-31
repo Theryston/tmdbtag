@@ -53,6 +53,12 @@ tmdbtag/
 ├── Cargo.lock
 ├── README.md
 ├── AGENTS.md
+├── release-plz.toml
+├── unix.sh
+├── win.ps1
+├── .github/
+│   └── workflows/
+│       └── release.yml
 └── src/
     ├── main.rs
     ├── app.rs
@@ -80,6 +86,27 @@ remain intentionally out of scope.
 The repository is a binary application, not a library product at this stage.
 Nevertheless, the core logic must be structured so it can be tested without
 driving a real terminal or contacting the real TMDB service.
+
+### Release and installer infrastructure
+
+The repository also contains the distribution boundary for the binary:
+
+- release-plz.toml is configured for git-only version history, does not publish
+  to crates.io, and uses the tmdbtag-v<version> tag namespace;
+- .github/workflows/release.yml prepares release metadata, creates the public
+  v<version> tag, builds six platform artifacts, generates SHA-256 checksums,
+  and publishes the GitHub Release;
+- unix.sh and win.ps1 download only the latest tagged release, verify its
+  checksum, install to a user-local directory, and must keep working without
+  administrator privileges in the default configuration.
+
+Keep artifact names synchronized across the workflow, installers, and README.
+The supported target names are x86_64-unknown-linux-gnu,
+aarch64-unknown-linux-gnu, x86_64-pc-windows-msvc,
+aarch64-pc-windows-msvc, x86_64-apple-darwin, and
+aarch64-apple-darwin. Installer output and release documentation must remain
+in English. Do not put credentials, tokens, or machine-local paths into
+release artifacts or public release notes.
 
 ## Project contract
 

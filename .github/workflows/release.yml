@@ -1,0 +1,244 @@
+name: Release (auto bump + build + GitHub Release)
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  BINARY_NAME: tmdbtag
+
+jobs:
+  prepare:
+    # A release commit must never recursively prepare another release.
+    if: ${{ github.actor != 'github-actions[bot]' }}
+    runs-on: ubuntu-latest
+
+    outputs:
+      released: ${{ steps.out.outputs.released }}
+      version: ${{ steps.out.outputs.version }}
+      tag: ${{ steps.out.outputs.tag }}
+      sha: ${{ steps.out.outputs.sha }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install release-plz
+        uses: taiki-e/install-action@release-plz
+
+      - name: Run release-plz update
+        run: release-plz update
+
+      - name: Commit, push, and tag the release
+        id: out
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # release-plz may create a new changelog file, so inspect both
+          # tracked and untracked changes.
+          if git diff --quiet && test -z "$(git status --porcelain)"; then
+            echo "released=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          VERSION="$(python3 - <<'PY'
+          import tomllib
+          from pathlib import Path
+
+          manifest = tomllib.loads(Path("Cargo.toml").read_text(encoding="utf-8"))
+          print(manifest["package"]["version"])
+          PY
+          )"
+
+          TAG="v$VERSION"
+          PACKAGE_TAG="tmdbtag-v$VERSION"
+
+          if git show-ref --tags --verify --quiet "refs/tags/$TAG"; then
+            echo "Tag $TAG already exists; refusing to overwrite it."
+            exit 1
+          fi
+
+          if git show-ref --tags --verify --quiet "refs/tags/$PACKAGE_TAG"; then
+            echo "Tag $PACKAGE_TAG already exists; refusing to overwrite it."
+            exit 1
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -A
+          git commit -m "chore(release): $TAG"
+          git push origin HEAD:main
+
+          git tag -a "$TAG" -m "$TAG"
+          git tag -a "$PACKAGE_TAG" -m "$PACKAGE_TAG"
+          git push origin "$TAG" "$PACKAGE_TAG"
+
+          SHA="$(git rev-parse HEAD)"
+          echo "released=true" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prepare
+    if: needs.prepare.outputs.released == 'true'
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+            cross: true
+
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+
+    steps:
+      - name: Checkout release commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux ARM64 cross compiler
+        if: matrix.cross == true
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+
+      - name: Build release binary
+        run: cargo build --locked --release --target ${{ matrix.target }}
+
+      - name: Prepare Unix artifact
+        if: matrix.os != 'windows-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}" dist/
+          tar -czf "dist/${{ env.BINARY_NAME }}-${{ matrix.target }}.tar.gz" \
+            -C dist "${{ env.BINARY_NAME }}"
+          rm "dist/${{ env.BINARY_NAME }}"
+
+      - name: Prepare Windows artifact
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}.exe" -Destination "dist/"
+          Compress-Archive -Path "dist/${{ env.BINARY_NAME }}.exe" -DestinationPath "dist/${{ env.BINARY_NAME }}-${{ matrix.target }}.zip"
+          Remove-Item "dist/${{ env.BINARY_NAME }}.exe"
+
+      - name: Upload platform artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BINARY_NAME }}-${{ matrix.target }}
+          path: dist/${{ env.BINARY_NAME }}-${{ matrix.target }}.${{ matrix.archive }}
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    needs: [prepare, build]
+    if: needs.prepare.outputs.released == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout release commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          fetch-depth: 0
+
+      - name: Download platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Assemble release files and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" \) -exec mv {} release/ \;
+
+          if ! find release -maxdepth 1 -type f \( -name "*.tar.gz" -o -name "*.zip" \) -print -quit | grep -q .; then
+            echo "No release archives were downloaded."
+            exit 1
+          fi
+
+          cd release
+          sha256sum -- *.tar.gz *.zip > checksums-sha256.txt
+
+      - name: Create or update GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          SHA: ${{ needs.prepare.outputs.sha }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          prerelease_flag=""
+          if [[ "$VERSION" == *-* ]]; then
+            prerelease_flag="--prerelease"
+          fi
+
+          if gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" release/* --clobber -R "$REPO"
+          else
+            gh release create "$TAG" release/* \
+              --title "tmdbtag $TAG" \
+              --generate-notes \
+              --verify-tag \
+              --target "$SHA" \
+              -R "$REPO" \
+              $prerelease_flag
+          fi

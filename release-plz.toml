@@ -1,0 +1,17 @@
+# tmdbtag is distributed as a binary from GitHub Releases, not published to crates.io.
+# Git tags are therefore the source of truth for release-plz version history.
+[workspace]
+git_only = true
+publish = false
+
+# The release workflow performs the final GitHub Release creation itself after
+# building all platform artifacts.
+git_release_enable = false
+
+# Keep release preparation explicit: only these Conventional Commit categories
+# can cause a version/changelog update.
+release_always = false
+release_commits = "^(feat|fix|perf|refactor|docs)(\\(.+\\))?:"
+
+# Keep the package's release-plz history in its own namespace.
+git_tag_name = "tmdbtag-v{{version}}"
