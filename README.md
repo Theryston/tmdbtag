@@ -1,283 +1,348 @@
-# title-tmdb-file
+# tmdbtag
 
-Modern, polished, and highly interactive CLI for organizing video files using
-the identifier and title registered in
-[The Movie Database (TMDB)](https://www.themoviedb.org/).
+> Turn a messy video folder into a clean, searchable, TMDB-powered library — directly from your terminal.
 
-> Status: The documented interactive MVP workflow is implemented through plan
-> construction, preview, safe copy/move execution, and per-file reporting.
-> Future retrieval commands, non-interactive modes, and auxiliary-file support
-> remain out of scope until separately specified.
+`tmdbtag` is a modern, interactive Rust CLI for giving video files a reliable identity. It finds
+videos recursively, lets you select exactly what you want in a keyboard-friendly file explorer,
+identifies every file with [The Movie Database (TMDB)](https://www.themoviedb.org/), and creates
+deterministic names that retain the essential metadata needed to understand the file later.
 
-This README is the source of truth for the expected behavior. Any
-implementation, flow change, or new feature must be compared against this
-document before it is incorporated.
+It is deliberately focused: no fragile filename guessing, no silent first-result selection, no
+overwrites, and no irreversible filesystem action hidden behind a prompt. You see the complete
+plan first, choose whether to copy or move, confirm it, and then watch a real byte-based progress
+bar while the operation runs.
 
-The command-line contract must be implemented with clap. The normal workflow is
-a guided terminal experience with clear steps, keyboard-friendly selection,
-searchable lists, progress feedback, a complete preview, and safe confirmation
-before any file operation. All source code, help text, prompts, status messages,
-errors, and documentation must be written in English. The language selected for
-TMDB metadata is independent from the language of the application interface.
+## Why tmdbtag feels different
 
-## Table of Contents
+Organizing a media collection should not require remembering obscure naming rules or manually
+looking up IDs in a browser. `tmdbtag` turns that repetitive work into a calm, guided workflow:
 
-- [Objective](#objective)
-- [MVP Scope](#mvp-scope)
-- [Concepts](#concepts)
-- [Main Flow](#main-flow)
-- [Interface Contract](#interface-contract)
-- [Modern CLI Experience](#modern-cli-experience)
-- [Naming Convention](#naming-convention)
-- [TMDB Integration](#tmdb-integration)
-- [File and Safety Rules](#file-and-safety-rules)
-- [How to Retrieve the Data in the Future](#how-to-retrieve-the-data-in-the-future)
-- [Planned Architecture](#planned-architecture)
-- [Folder Structure](#folder-structure)
-- [Configuration and Execution](#configuration-and-execution)
-- [Errors and Exit Codes](#errors-and-exit-codes)
-- [Acceptance Criteria](#acceptance-criteria)
-- [Testing Strategy](#testing-strategy)
-- [Implementation Tasks](#implementation-tasks)
-- [Roadmap](#roadmap)
-- [References](#references)
+- Search TMDB as you type with debounced live results.
+- See whether a result is a movie or a TV series before selecting it.
+- Identify each selected file independently, even when several files share a folder.
+- Enter a TMDB ID directly when you already know exactly what you want.
+- Enter and validate a season and episode for series files through TMDB.
+- Browse the entire source tree in one expandable explorer instead of jumping between folders.
+- Keep the interface in polished, consistent English while requesting TMDB metadata in your chosen language.
+- Copy files while preserving the originals, or move them only after safe publication.
+- Preview every source-to-destination mapping before anything changes.
+- Use a reserved filename delimiter so basic metadata can be recovered programmatically later.
+- See progress based on actual transferred bytes, not an arbitrary file counter.
 
-## Objective
+The result is a collection that is easier to scan today and easier to automate tomorrow.
 
-The program is run inside a folder that may contain video files directly and may
-contain nested folders with video files. It must:
+## A quick look
 
-1. load the saved TMDB configuration from `~/.title-tmdb-file/config.json` on
-   Unix-like systems, or the equivalent current user's home directory on
-   Windows;
-2. ask only for missing or invalid TMDB configuration fields, using secure
-   prompts;
-3. ask whether selected videos should be copied or moved;
-4. ask which folder will be used as the destination;
-5. recursively discover every recognized video file below the current directory,
-   including videos directly in the current directory;
-6. present one expandable file-explorer selection containing video files and
-   only the folders that contain at least one video descendant;
-7. allow one or more video files to be selected from that explorer, with folders
-   collapsed by default and expanded or collapsed with `Tab`;
-8. identify every selected video file as a movie or TV series by searching TMDB
-   or entering an ID manually;
-9. ask for the season and episode for each selected video identified as a TV
-   series;
-10. show a complete operation plan;
-11. copy or move the selected files to the destination folder, renaming them
-    with enough data to locate the item in TMDB again.
-
-The program must not alter the video contents. Its job is to organize: select,
-rename, and either copy or move according to the explicit operation choice.
-
-## MVP Scope
-
-### Included
-
-- clap-based command-line parsing and standard --help and --version behavior.
-- A modern, polished, highly interactive terminal interface.
-- English source code and English user-facing text.
-- Execution using the current working directory as the source root.
-- One unified, expandable video-file explorer rooted at the current directory.
-- Multiple video-file selection from any visible level of that explorer.
-- Recognition of common video filename extensions such as `.mkv`, `.mp4`,
-  `.avi`, `.mov`, `.webm`, `.m4v`, `.ts`, and `.m2ts`.
-- Recursive video discovery inside the current directory and all real
-  subfolders.
-- Display of only folders that contain at least one eligible video descendant.
-- Collapsed-by-default folders with `Tab` expand/collapse navigation.
-- Destination-subtree exclusion from discovery at any depth.
-- Real-time online search in TMDB.
-- Per-user persistence for the TMDB API key and metadata language in
-  `~/.title-tmdb-file/config.json`.
-- Conditional startup prompts that ask only for missing or invalid saved fields.
-- A `config` command that deliberately reopens both configuration fields.
-- Manual identification by numeric TMDB ID.
-- Support for movies and TV series.
-- A complete TMDB identification loop for every selected video file, including
-  files in the same directory tree.
-- Manual season and episode input for each series file.
-- Plan preview before any change is made to disk.
-- An explicit copy-or-move choice before destination and media selection.
-- Byte-based transfer progress for both copying and moving.
-- Independent destination copies that never modify the original source files.
-- Deterministic, filesystem-safe names.
-- Protection against accidental overwrites.
-- Per-file final report.
-
-### Initially out of scope
-
-- Renaming or moving folders.
-- Creating a subfolder for each movie or series.
-- Moving subtitles, images, .nfo files, or other auxiliary files.
-- Automatically detecting season and episode from the original filename.
-- Changing the codec, resolution, audio, subtitles, or any video content.
-- Downloading videos.
-- Synchronizing data with an external library.
-- Maintaining a local database.
-- Overwriting or replacing existing files.
-- Following symbolic links during discovery.
-- Operating without interactive confirmation.
-
-These items may be considered in the future, but they must not be implemented
-implicitly.
-
-## Concepts
-
-| Term               | Meaning                                                                                                                                                                                                   |
-| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Current directory  | The directory from which the executable was started. It is the source root in the MVP.                                                                                                                    |
-| Source container   | An internal validation grouping: the direct child folder containing a selected nested video, or the current source root for a video selected directly from the root. It is not a separate user selection. |
-| Destination folder | The directory selected after startup configuration, where videos will be copied or moved. It may also be called the target folder.                                                                         |
-| TMDB item          | A movie or TV series returned by and confirmed against TMDB.                                                                                                                                              |
-| TMDB ID            | The numeric identifier of a movie or TV series in TMDB.                                                                                                                                                   |
-| Movie              | A TMDB item of type movie.                                                                                                                                                                                |
-| Series             | A TMDB item of type tv.                                                                                                                                                                                   |
-| Episode            | The combination of a season and episode number for a TV series.                                                                                                                                           |
-| File operation     | The explicit `Copy` or `Move` mode selected before destination and media selection.                                                                                                                        |
-| Plan               | The final mapping between each source file and the name/path it will have in the destination.                                                                                                             |
-| Configuration file | The per-user JSON file at `~/.title-tmdb-file/config.json` that stores the TMDB API key and metadata language.                                                                                            |
-
-### Unit-of-work rule
-
-Each selected video file represents one independent TMDB identification unit.
-The explorer folder is display context and does not determine the metadata
-assigned to every file inside it.
-
-- Every selected video runs the complete identification loop: choose search or
-  manual ID, resolve and confirm the TMDB item, and then continue to naming.
-- A movie file produces one movie operation and does not need an episode
-  reference.
-- A series file produces one episode operation after its season and episode are
-  individually validated against TMDB.
-- Multiple files in the same directory tree may represent different movies,
-  different series, or multiple episodes of the same series.
-
-This rule prevents one prompt from assigning the same metadata to files that may
-belong to different works while the explorer keeps the entire media tree visible
-in one selection step.
-
-## Main Flow
-
-The mandatory MVP flow is:
+The normal workflow is intentionally easy to understand:
 
 ```text
-Start and parse command-line arguments with clap
-        |
-        v
-Load ~/.title-tmdb-file/config.json
-        |
-        v
-Ask only for missing TMDB configuration fields
-        |
-        v
-Save any newly completed configuration
-        |
-        v
-Validate TMDB configuration
-        |
-        v
-Choose copy or move
-        |
-        v
-Choose the destination folder
-        |
-        v
-Recursively scan the current directory, excluding the destination subtree
-        |
-        v
-Use one collapsed-by-default expandable video explorer
-  select individual videos with Space
-  expand or collapse folders with Tab
-  confirm the complete video array with Enter
-        |
-        v
-For each selected video:
-  identify a movie or series in TMDB
-  if it is a series, enter season/episode for that video
-        |
-        v
-Validate all paths and conflicts
-        |
-        v
-Display the complete preview
-        |
-        v
-Confirm copy or move
-        |
-        v
-Copy or move and rename the files while showing byte progress
-        |
-        v
-Display the final summary
+tmdbtag
+  │
+  ├─ Load or collect your TMDB API key and metadata language
+  ├─ Choose Copy or Move
+  ├─ Choose the destination library
+  ├─ Select videos from the recursive file explorer
+  ├─ Identify each file with live TMDB search or a direct ID
+  ├─ Enter and validate episode data for series
+  ├─ Review the complete plan
+  ├─ Confirm
+  └─ Transfer files with safe publication and byte-based progress
 ```
 
-The saved TMDB configuration must be loaded before filesystem discovery. If the
-file is absent, or if either field is absent, empty, or invalid, the
-corresponding English prompt is shown and the completed values are saved. When
-both fields are valid in the file, the normal organization workflow does not
-prompt for them again. The destination folder must then be requested before the
-unified media tree is scanned so its entire subtree can be excluded. clap must
-process --help, --version, and command-level help before the interactive wizard;
-those paths exit without asking for credentials or touching the filesystem.
-
-## Interface Contract
-
-The exact prompt wording may be refined during implementation, but the order,
-decisions, and validations below are mandatory.
-
-### 1. Command-line parsing with clap
-
-clap is mandatory for the public command-line interface. It must own:
-
-- parsing command-line arguments and options;
-- --help output;
-- --version output;
-- invalid-argument diagnostics;
-- command metadata and usage examples;
-- the boundary between command-line mode and the interactive wizard.
-
-The default invocation must start the interactive workflow:
-
-```bash
-title-tmdb-file
-```
-
-The explicit configuration command must be available through the same clap
-parser:
-
-```bash
-title-tmdb-file config
-```
-
-`config` opens the shared TMDB configuration wizard, asks for both fields, and
-saves the result to the per-user configuration file. It must not start the
-media-selection workflow.
-
-The help and version paths must work without a TMDB API key, a network
-connection, or a readable media directory:
-
-```bash
-title-tmdb-file --help
-title-tmdb-file --version
-```
-
-Do not parse arguments manually with std::env::args, string matching, or ad-hoc
-positional conventions. Interactive questions are not a replacement for clap's
-command-line contract.
-
-### 2. Startup configuration
-
-Before the normal workflow reaches the destination prompt or discovers any
-media, it must load the per-user configuration file:
+Example output names:
 
 ```text
-~/.title-tmdb-file/config.json
+550__S__MOVIE__S__Fight Club.mkv
+1399__S__SERIES__S__S01E01__S__Game of Thrones.mp4
 ```
 
-The home-directory portion is resolved using the host operating system's
-current-user convention. The supported JSON fields are:
+Every part has a purpose. The ID is stable, the media type is explicit, the series episode is
+machine-readable, and the title remains pleasant for humans to read.
+
+## Quick start
+
+### Requirements
+
+- Rust and Cargo supported by the project toolchain.
+- A TMDB API key with permission to use the TMDB API.
+- An interactive terminal. The current MVP is designed for keyboard-driven terminal use.
+- Read access to the source files and write access to the selected destination.
+
+### Run from the repository
+
+```bash
+cargo run --release
+```
+
+To install the locally built binary and run it by name:
+
+```bash
+cargo install --path .
+tmdbtag
+```
+
+The first normal launch asks for the TMDB configuration before it looks at media files. The
+configuration is saved for future runs, so subsequent sessions can begin immediately when the
+saved values are still complete and valid.
+
+### Basic usage
+
+```bash
+tmdbtag
+```
+
+The guided session looks like this:
+
+1. `tmdbtag` loads the current user's configuration.
+2. If needed, it securely asks for the TMDB API key and asks which language TMDB should use for metadata.
+3. It asks whether the operation should be `Copy` or `Move`.
+4. It asks where the organized files should be written.
+5. It scans the current working directory recursively and opens one unified video explorer.
+6. You expand folders, select individual videos, and confirm the selected array.
+7. For each selected file, you search TMDB live or enter a TMDB ID manually.
+8. For series, you enter a season and episode, which are validated against TMDB.
+9. It builds and displays the complete plan, including every destination name.
+10. A final confirmation starts the operation. The default is always negative.
+
+The directory where you launch the command is the source root. The executable's location is not
+used as the source root.
+
+## Commands
+
+The command surface is intentionally small:
+
+```bash
+tmdbtag              # Start the interactive organization workflow
+tmdbtag config       # Reopen and update both TMDB configuration fields
+tmdbtag --help       # Show help without starting the wizard
+tmdbtag --version    # Show the installed version
+```
+
+`tmdbtag config` uses the same validation, prompts, persistence, and secret handling as the normal
+startup flow. It changes configuration only; it never scans media or starts a copy/move operation.
+
+Help, version, command-help, and invalid-command paths are handled by `clap` before the wizard.
+They do not require a TMDB key, a network connection, or a readable media directory.
+
+## The interactive experience
+
+### Configuration first
+
+Before any media discovery, the CLI asks for:
+
+- **TMDB API key** — entered using masked/password-style input.
+- **TMDB metadata language** — initially defaulted to `pt-BR`, with the application UI remaining in English.
+
+The normal workflow prompts only for fields that are missing or invalid in the saved configuration.
+If one field is present and valid, it is not unnecessarily requested again. An environment value
+from `TMDB_API_KEY` or `TMDB_LANGUAGE` can provide a masked or visible default when the corresponding
+saved field is unavailable, but it does not bypass a required prompt.
+
+The API key is stored only in:
+
+```text
+~/.tmdbtag/config.json
+```
+
+On Unix-like systems, `tmdbtag` uses private permissions for the configuration directory and file
+when it creates them. The key is never included in filenames, previews, plans, logs, errors, or
+debug output.
+
+### One explorer for the whole source tree
+
+The file picker is a compact terminal file explorer, not a sequence of unrelated folder prompts.
+It displays:
+
+- videos directly in the current directory;
+- folders that contain at least one eligible video descendant;
+- videos at any depth below those folders.
+
+Folders start collapsed. The default state never silently selects the first file.
+
+Typical controls are:
+
+| Key | Action |
+| --- | --- |
+| `↑` / `↓` | Move the highlight |
+| `j` / `k` | Move the highlight on terminals where those keys are convenient |
+| `Tab` | Expand or collapse the highlighted folder |
+| `Space` | Select or deselect a video |
+| `Enter` | Confirm the selected videos |
+| `Esc` | Cancel the current interaction |
+
+Only video files can be selected. Folder rows are navigation containers. All paths shown in the
+interactive interface are relative to the current source root, while the application retains the
+exact paths internally for validation and execution.
+
+Discovery is deterministic: entries are sorted by relative path, symbolic links are not followed,
+and the destination subtree is excluded when the destination is inside the source root.
+
+### Live TMDB identification
+
+Each selected file is its own identification unit. This matters when a folder contains several
+different movies, several episodes, or a mixture of movies and series.
+
+For each file, the user chooses one of two paths:
+
+1. **Search TMDB by title** — type a query and receive live results after a debounce interval.
+2. **Enter a TMDB ID manually** — provide the numeric ID and choose whether it represents a movie or a series.
+
+The live selector keeps the query and results together. As the query changes, `tmdbtag` requests
+updated movie and TV results without requiring a separate filter-and-submit cycle. Results are
+keyboard-selectable, clearly labeled as `[MOVIE]` or `[SERIES]`, and never silently accepted just
+because they happen to be first.
+
+The selected item is resolved through TMDB and confirmed before it becomes part of a move plan.
+TMDB is the authority for the numeric ID, media type, and title.
+
+For a series, the CLI asks for the season and episode for that specific file. It validates the
+episode through TMDB before showing the final plan. No episode or title is inferred from a vague
+original filename in the MVP.
+
+## Copy or move, by choice
+
+The operation mode is selected near the beginning of the workflow:
+
+- **Copy** creates a new independent file in the destination and leaves the original untouched.
+- **Move** organizes the file into the destination and removes the source only after the destination
+  has been published successfully.
+
+Both modes use the same plan, naming rules, collision checks, confirmation screen, and progress
+reporting. The choice is visible in the preview, so there is no ambiguity about whether originals
+will remain.
+
+## Naming that is human-friendly and machine-recoverable
+
+Generated filenames use the reserved field delimiter `__S__`:
+
+### Movies
+
+```text
+<tmdb_id>__S__MOVIE__S__<normalized_title>.<lowercase_video_extension>
+```
+
+Example:
+
+```text
+550__S__MOVIE__S__Fight Club.mkv
+```
+
+### Series episodes
+
+```text
+<tmdb_id>__S__SERIES__S__S<season>E<episode>__S__<normalized_series_title>.<lowercase_video_extension>
+```
+
+Example:
+
+```text
+1399__S__SERIES__S__S01E01__S__Game of Thrones.mp4
+```
+
+The season and episode are intentionally joined as `S01E01`. This keeps the metadata fields
+stable while still allowing future code to split the episode component at `S` and `E`.
+
+### Normalization rules
+
+Titles come from TMDB in the configured metadata language and are normalized only at the filename
+boundary. The normalizer:
+
+- preserves the numeric TMDB ID and episode numbers exactly;
+- removes or replaces characters that are invalid or unsafe on supported filesystems, including `:`;
+- removes control characters and path separators;
+- replaces occurrences of the reserved `__S__` token so the title cannot create a false metadata field;
+- collapses unnecessary whitespace and replacement separators;
+- avoids trailing filename noise and platform-reserved names;
+- preserves Unicode text when it is safe;
+- truncates only the title component when a platform-safe filename length limit requires it;
+- preserves the original video's extension while emitting it in lowercase.
+
+The title is not used as a parser boundary. `:` may be normalized to a safe visual separator such
+as ` - `, while `__S__` remains the only metadata field delimiter.
+
+`tmdbtag` does not add years, codecs, resolutions, release groups, original filenames, or episode
+titles in the MVP. It does not invent collision suffixes such as `(1)`.
+
+### Recovering basic metadata later
+
+The generated filename is intentionally structured for future automation. A future reader can:
+
+1. remove the final extension;
+2. split the stem on `__S__`;
+3. read `[id, MOVIE, title]` for a movie;
+4. read `[id, SERIES, S01E01, title]` for a series;
+5. parse the `S` and `E` markers from the episode field;
+6. use the ID to request richer metadata from TMDB when needed.
+
+The title is a display hint. The TMDB ID is the durable lookup key.
+
+## Safety you can see
+
+`tmdbtag` treats file operations as a two-phase process:
+
+```text
+Discover → Identify → Build plan → Validate everything → Preview → Confirm → Execute → Report
+```
+
+No file is copied, moved, renamed, or deleted while the user is still identifying media or while
+the plan is being assembled.
+
+Before execution, the complete plan is revalidated. This includes source existence, source type,
+source snapshots, destination constraints, generated names, collisions, and relevant filesystem
+state. A destination that does not exist may be created only after explicit confirmation, and its
+actual creation is deferred until the commit phase.
+
+The destination cannot be the current source directory, cannot overlap a selected nested source
+container, and is excluded from discovery when it is inside the current source tree.
+
+`tmdbtag` never overwrites an existing destination by default. If a source disappears or changes,
+or an unexpected operation fails, execution stops by default and the final report separates:
+
+- completed operations;
+- the failed operation and its safe error category;
+- pending operations that were intentionally not attempted.
+
+### Copy safety
+
+Copies stream bytes to a destination-side temporary file. The temporary file is verified against
+the source before the final name is published with no-replace semantics. A failed or interrupted
+copy leaves the source intact and does not make a partial file look complete.
+
+### Move safety
+
+Same-volume moves use a no-replace publication strategy where the platform permits it, then remove
+the source only after the destination is known to exist. Cross-volume moves use the same verified
+temporary-copy process as a copy and remove the source only after successful publication.
+
+### Real byte-based progress
+
+The aggregate progress percentage is calculated from bytes:
+
+```text
+completed source bytes ÷ total planned source bytes × 100
+```
+
+For copies and cross-volume moves, progress advances as chunks are written. For safe same-volume
+moves, the file's bytes are marked complete after its publication succeeds because no byte stream
+needs to be transferred. Zero-byte files are treated as complete once published.
+
+## Supported video files
+
+Discovery uses one centralized, case-insensitive allowlist rather than assuming that every video
+has the `.mkv` extension. It includes common formats such as:
+
+```text
+.mkv  .mp4  .avi  .mov  .webm  .m4v  .mpg  .mpeg  .ts  .m2ts
+.wmv  .flv  .ogv  .vob  .mts   .mxf  .3gp  .asf   .rm  .rmvb
+```
+
+The allowlist also covers additional formats used by common media workflows. Matching is
+case-insensitive, so `VIDEO.MKV` and `video.mkv` are both eligible. Regular files are eligible;
+symbolic links are intentionally skipped in the MVP.
+
+## Configuration
+
+The persisted configuration is small and explicit:
 
 ```json
 {
@@ -286,1245 +351,124 @@ current-user convention. The supported JSON fields are:
 }
 ```
 
-The normal workflow follows these rules:
+Location:
 
-- if the file is missing, ask for the API key first and the metadata language
-  second;
-- if only the API key is missing or invalid, ask only for the masked API-key
-  field;
-- if only the language is missing or invalid, ask only for the language field;
-- if both saved fields are valid, do not show either startup prompt;
-- save a complete configuration after missing values have been accepted;
-- keep all application-owned prompts and messages in English.
+```text
+~/.tmdbtag/config.json
+```
 
-When both fields need to be collected, the API-key question is always first. The
-prompts happen before the destination prompt or any media discovery.
+The language controls the language requested from TMDB for titles and metadata. It does not
+translate the CLI. All application-owned prompts, labels, help text, progress messages, errors,
+and reports are in English.
 
-Rules for the API-key prompt:
-
-- use a masked/password-style input;
-- never echo the key;
-- require a non-empty key;
-- use the saved key as the masked default when it exists;
-- use `TMDB_API_KEY` as a masked default only when the saved key is unavailable;
-- never display the key in a preview, error, debug representation, log, or
-  report;
-- validate the key against TMDB before proceeding to media-tree selection;
-- allow retry or cancellation when the key is rejected.
-
-Rules for the language prompt:
-
-- use an editable locale field with common examples such as `pt-BR` and `en-US`;
-- allow a supported code to be entered manually when needed;
-- use `pt-BR` as the initial default;
-- use the saved language before considering `TMDB_LANGUAGE` as a default;
-- validate or normalize the selected code before making the first metadata
-  request;
-- keep the application UI in English regardless of the selected TMDB language.
-
-The `config` command always asks for both fields, even when the configuration
-file is complete. Existing values may be shown as editable defaults, and
-pressing Enter for the masked key may reuse the saved value. A canceled update
-must leave the existing file unchanged.
-
-The selected language affects metadata returned by TMDB, especially the title
-used in the generated filename. It does not translate the CLI itself.
-
-### 3. Initialization
-
-At startup:
-
-- obtain the current working directory;
-- verify that it exists and can be read;
-- do not assume that the executable's folder is the source root;
-- do not change anything before final confirmation.
-
-Expected usage:
+To change both values intentionally:
 
 ```bash
-cd /path/to/input-folder
-title-tmdb-file
+tmdbtag config
 ```
 
-### 4. Choosing the file operation
+The command asks for both fields even when a complete configuration already exists. It is the
+supported way to replace a key or switch metadata language without starting a media workflow.
 
-Before destination selection or media discovery, ask how the selected videos
-should be processed:
+For local automation or development environments, `TMDB_API_KEY` and `TMDB_LANGUAGE` may provide
+fallback defaults for missing saved fields. They do not cause the normal wizard to skip a required
+interactive configuration prompt.
 
-- `Copy selected videos (keep originals)` creates independent destination files
-  and leaves every source file unchanged;
-- `Move selected videos (remove originals after successful publication)` removes
-  each source only after its destination has been safely published and verified.
+## TMDB integration
 
-The selected operation is stored in the immutable plan and shown again in the
-preview and final report. Canceling this prompt must not touch the filesystem.
+`tmdbtag` uses TMDB for:
 
-### 5. Choosing the destination folder
+- title search across movies and TV series;
+- media-type distinction;
+- item details and canonical IDs;
+- season and episode validation;
+- localized metadata according to the saved language.
 
-The first filesystem-related prompt must ask for the destination folder path,
-after the TMDB API key and language have been configured.
+Network requests use a finite timeout, the configured language, and typed handling for authentication
+errors, rate limits, not-found responses, invalid payloads, server failures, and timeouts. A file is
+never placed into the final plan when the metadata required for its name cannot be verified.
 
-Rules:
+Create or manage a TMDB API key through the official [TMDB developer documentation](https://developer.themoviedb.org/docs/getting-started).
+Use of the TMDB API is subject to [TMDB's terms and policies](https://www.themoviedb.org/api-terms-of-use).
 
-- accept an absolute path or a path relative to the current directory;
-- normalize the path before using it;
-- accept an existing folder;
-- if the folder does not exist, explicitly ask whether it should be created;
-- reject a path that exists as a file;
-- reject the current directory as the destination;
-- reject a path that would overlap a selected source container, except that the
-  current source root may contain a destination child when the selected files
-  are directly in the root;
-- when the destination is inside the current directory, exclude its complete
-  subtree from the media explorer;
-- do not create the folder while the path is being entered; creation may happen
-  only after validation and the user's confirmation.
+## What tmdbtag does not do yet
 
-Once defined, the destination must remain visible throughout the rest of the
-flow.
+The current MVP intentionally organizes video files and nothing more. It does not:
 
-### 6. Unified video-file explorer
+- rename folders or build a media-server folder hierarchy;
+- rename or move subtitles, images, NFO files, or other auxiliary files;
+- download media, transcode video, inspect codecs, or alter file contents;
+- infer series episodes from original filenames;
+- overwrite existing destination files;
+- follow symbolic links during discovery;
+- provide a database or a metadata retrieval command;
+- provide a non-interactive/batch mode;
+- automatically select a TMDB result on the user's behalf.
 
-After the destination is configured, perform one recursive, read-only discovery
-from the current directory. The result feeds one interactive explorer; there is
-no separate source-folder selection followed by one video selector per folder.
+These boundaries keep the first version predictable and make the naming contract a dependable
+foundation for future retrieval and automation features.
 
-Discovery and explorer rules:
+## Project shape
 
-- include regular video files directly in the current directory;
-- recurse into real subdirectories at every depth;
-- recognize the supported video extensions case-insensitively, including `.mkv`,
-  `.mp4`, `.avi`, `.mov`, `.webm`, `.m4v`, `.ts`, `.m2ts`, `.wmv`, `.flv`, and
-  other extensions in the centralized video-extension allowlist;
-- never follow symbolic links;
-- exclude the destination directory and every descendant below it;
-- include a folder row only when it contains at least one discovered video
-  descendant;
-- sort sibling folders and files deterministically by relative path;
-- display all rows with paths relative to the current source root;
-- retain the exact source `PathBuf` for every file; display labels are never
-  execution paths;
-- show all folder rows collapsed by default;
-- move the cursor with the arrow keys (and supported navigation aliases);
-- use `Tab` to expand or collapse the highlighted folder;
-- use `Space` to select or deselect a highlighted video file;
-- make folders containers rather than selectable media items;
-- use `Enter` to confirm the selected video array;
-- require at least one explicitly selected video;
-- allow `Escape`/cancel without modifying any files;
-- show a helpful empty state when the current directory contains no eligible
-  videos.
-
-The explorer is a single selection operation. Expanding a folder changes
-visibility only; it does not select every descendant automatically. The first
-file must never be selected silently.
-
-### 7. Identifying the item in TMDB
-
-After the unified video array is confirmed, present two options for each
-selected file:
-
-1. search by text;
-2. enter a TMDB ID directly.
-
-#### Text search
-
-The search must open a live, keyboard-driven selector rather than a separate
-query prompt followed by a second filter prompt. The selector must:
-
-- keep the query editable while the result list is visible;
-- start a search after the user stops typing for a debounce interval of
-  approximately 500 ms;
-- avoid sending a request for an empty query and avoid sending a request for
-  fewer than two non-whitespace characters;
-- search both movies and TV series through the documented endpoints;
-- replace stale results as soon as the query changes, so Enter cannot select a
-  result for an older query;
-- clearly distinguish each result type;
-- show at least the ID, type, title, and year when available;
-- allow result navigation with `Up`/`Down` and selection with `Enter`;
-- allow `Escape` to cancel the current search interaction;
-- never silently choose the first result.
-
-The live search may show a bounded result window so it remains usable in a small
-terminal. The selected candidate is still fetched through its details endpoint
-and explicitly confirmed before it enters the operation plan.
-
-Example presentation:
+The codebase is organized around a small application layer and explicit boundaries:
 
 ```text
-TMDB live search · Search movies and TV series as you type
-Query: the office
-4 result(s) found.
-
-Results: 4 · Up/Down choose · Enter select
-› [SERIES] 2316 The Office (2001)
-  [SERIES] 2315 The Office (1995)
-  [MOVIE]  ... The Office (year)
-
-Type to search · Up/Down choose · Enter select · Esc cancel
-```
-
-After a result is selected, the program must fetch the item's details and show
-an identification confirmation before building the plan.
-
-#### Manually entered ID
-
-When the user chooses to enter an ID:
-
-- ask for the type (movie or series) before the ID, to remove ambiguity between
-  namespaces;
-- accept only a positive numeric ID;
-- fetch details for the selected type from TMDB;
-- reject IDs that do not exist or do not match the selected type;
-- show the returned title and ask for confirmation;
-- never accept a manually entered title as a substitute for TMDB data;
-- repeat this complete identification flow independently for every selected
-  video file, including multiple files from the same directory tree.
-
-### 8. Series episode data
-
-After a selected video file has been identified as a series, ask for:
-
-- the season number;
-- the episode number.
-
-Rules:
-
-- allow season 0 for specials when TMDB accepts that combination;
-- accept non-negative integers;
-- validate the episode against TMDB data before the preview;
-- do not accept the same series + season + episode combination twice in one
-  execution;
-- ask for the data individually even when multiple files belong to the same
-  series;
-- allow the input to be corrected before the preview;
-- do not infer these numbers from the original filename in the MVP.
-
-TMDB identification is repeated for every selected video file. Files in the same
-directory tree do not implicitly share a series or movie selection; the user
-confirms the metadata for each file.
-
-Example:
-
-```text
-Confirmed series: Game of Thrones (TMDB 1399)
-
-File: season-01/episode-01.mp4
-Season: 1
-Episode: 1
-
-File: season-01/episode-02.mp4
-Season: 1
-Episode: 2
-```
-
-The title used in the filename is the series title returned by TMDB, not the
-individual episode title. The series ID and combined `S<season>E<episode>` field
-identify the episode together.
-
-### 9. Plan preview
-
-Before copying or moving any file, display every operation that will be
-performed:
-
-```text
-Destination: ../library/organized
-Operation: Copy (original files will be kept)
-Total bytes: 1.2 GiB
-
-SOURCE                                      DESTINATION
-movies/Fight Club.mkv                       ../library/organized/550__S__MOVIE__S__Fight Club.mkv
-series/season-01/episode-01.mp4             ../library/organized/1399__S__SERIES__S__S01E01__S__Game of Thrones.mp4
-series/season-01/episode-02.mp4             ../library/organized/1399__S__SERIES__S__S01E02__S__Game of Thrones.mp4
-```
-
-The preview must show:
-
-- the destination folder;
-- the selected operation (`Copy` or `Move`) and whether source files are kept;
-- the total number of files;
-- the total number of source bytes that will be copied or moved;
-- a relative source path for every file;
-- a relative destination path for every file;
-- the TMDB ID;
-- the item type;
-- season and episode when applicable;
-- detected conflicts or warnings.
-
-The normal interactive UI shows every media-tree path relative to the current
-source root. A video inside a nested folder is displayed with its complete
-relative path, while indentation and folder icons communicate the hierarchy. The
-application retains absolute or normalized `PathBuf` values internally; relative
-display text must never be used as an execution path. Long explorer labels may
-be truncated for terminal width, but the suffix containing the filename should
-remain visible.
-
-If there is a validation error or conflict, confirmation of the plan must not be
-allowed until the issue is corrected or the group is canceled.
-
-### 10. Confirmation and result
-
-The final prompt must be explicit and must name the selected operation, for
-example:
-
-```text
-Copy and rename 3 files? [y/N]
-```
-
-The default must be do not execute (N).
-
-If the user declines:
-
-- move nothing;
-- rename nothing;
-- delete nothing;
-- report that the operation was canceled.
-
-If the user confirms:
-
-- execute only the plan that was displayed;
-- show one aggregate progress bar whose percentage is the bytes copied or
-  logically moved divided by the total bytes in the plan;
-- report success or failure for each copy or move;
-- display totals at the end.
-
-## Modern CLI Experience
-
-The application must feel like a polished modern terminal product, not like a
-collection of raw console questions. The visual design can evolve, but the
-quality bar is explicit: the interface must be clear, responsive,
-keyboard-friendly, consistent, and safe.
-
-### Command-line layer
-
-clap is responsible for the command-line contract. The interactive wizard is the
-default command, while clap owns the standard command-line behavior around it.
-
-The initial command-line experience must provide:
-
-- a clear application name and description;
-- --help with a concise overview, usage, options, and examples;
-- --version with the package version;
-- consistent invalid-argument errors;
-- a stable exit-code contract;
-- room for future subcommands and non-interactive modes without rewriting the
-  wizard;
-- no API-key prompt when the user asks only for --help or --version.
-
-The interactive wizard must not replace clap parsing, and clap argument parsing
-must not be duplicated inside prompt handlers.
-
-### Visual hierarchy
-
-The terminal UI should include, where supported by the chosen interaction
-library:
-
-- a small branded header containing the application name and version;
-- a visible step indicator such as Configuration, Operation, Destination,
-  Sources, Metadata, Preview, and Execute;
-- clear section titles;
-- consistent success, warning, error, and informational styles;
-- aligned tables or panels for source and destination paths;
-- a visible count of discovered and selected video files;
-- a clear indication that the current selection is rooted in the current
-  directory;
-- a compact tree explorer with visible folder expand/collapse state;
-- an explicit keyboard hint for `Space` selection, `Tab` expansion/collapse, and
-  `Enter` confirmation;
-- a single per-file context line showing the selected file's relative path and
-  position;
-- preservation of each completed file's identification output as an execution
-  history;
-- all TMDB search, selection, confirmation, and series episode prompts for one
-  file grouped below that file's context line until its identification is
-  complete;
-- a concise final summary;
-- a graceful fallback when color, Unicode, or advanced terminal features are
-  unavailable.
-
-Color and symbols may improve the experience, but safety-critical information
-must remain understandable without color alone.
-
-### Interaction quality
-
-Interactive controls should support:
-
-- keyboard navigation;
-- visible selection state;
-- multiple selection with an obvious toggle action;
-- search or filtering for long folder, file, and TMDB result lists;
-- back navigation when a previous decision can be safely edited;
-- Escape or an equivalent cancellation action;
-- confirmation before destructive changes;
-- helpful empty states;
-- retry for recoverable network or input errors;
-- non-blocking-looking feedback during network requests;
-- a byte-based progress bar during file operations, showing the percentage of
-  the total plan bytes already copied or moved.
-
-The UI must never appear frozen during a network request or file transfer. A
-spinner or status line should explain whether it is searching, loading details,
-validating an episode, preparing the plan, copying, or moving.
-
-### English interface
-
-All application-owned text must be in English:
-
-- clap descriptions and help output;
-- headers and step labels;
-- prompts and option labels;
-- validation errors;
-- API and filesystem errors;
-- progress messages;
-- completion summaries;
-- debug labels and developer-facing diagnostics.
-
-Titles and other metadata returned by TMDB are external content and may appear
-in the language selected by the user. That does not change the language of the
-application interface.
-
-### Responsive terminal behavior
-
-The interface must remain usable in small and large terminals:
-
-- avoid assuming an 80-column terminal;
-- truncate or wrap long paths deliberately;
-- never hide the final filename or conflict state;
-- keep tables readable when paths are long;
-- avoid emitting unreadable escape sequences when output is redirected;
-- detect non-interactive output and fail with an actionable message until a
-  documented non-interactive mode exists;
-- do not require a mouse;
-- preserve useful behavior when color is disabled.
-
-### Performance perception
-
-The CLI should feel fast even when the work is not instantaneous:
-
-- show immediate feedback after each action;
-- use a spinner for network operations and a byte-based progress bar for file
-  operations;
-- reuse the TMDB HTTP client;
-- use bounded requests and bounded retries;
-- avoid rescanning a folder unnecessarily;
-- avoid repeating identical metadata requests during one run;
-- do not sacrifice correctness for a faster-looking result;
-- never perform a hidden filesystem mutation to improve perceived speed.
-
-## Naming Convention
-
-The final filename must contain the TMDB ID, the media type, the series season
-and episode when applicable, and the title returned by the API after mandatory
-filename normalization. Every metadata field is separated by the reserved
-`__S__` delimiter. The final extension is the selected source video's extension,
-emitted in lowercase. The program must preserve the video's format and must
-never rename an `.mp4` source to `.mkv` merely as part of organization.
-
-`__S__` is a filename-safe field delimiter reserved exclusively for the
-generated naming contract. The normalized title must never contain this token,
-including any case variation, so a future metadata reader can recover the fields
-with a simple split.
-
-| Type | Format | Example |
-| --- | --- | --- |
-| Movie | `<id>__S__MOVIE__S__<normalized_title>.<video_extension>` | `550__S__MOVIE__S__Fight Club.mkv` |
-| Series | `<id>__S__SERIES__S__S<season>E<episode>__S__<normalized_series_title>.<video_extension>` | `1399__S__SERIES__S__S01E01__S__Game of Thrones.mp4` |
-
-### Composition rules
-
-- use the numeric TMDB ID, without a tmdb prefix;
-- use `__S__` between every metadata field;
-- use the literal `MOVIE` or `SERIES` media-type segment;
-- for series, use one combined `S<season>E<episode>` segment;
-- reserve `__S__` exclusively for field boundaries; it must not occur in the
-  normalized title;
-- do not include the year, codec, resolution, language, release group, or
-  original filename;
-- use the localized title returned by TMDB, after mandatory filename
-  normalization;
-- if no localized title is available, use the original title returned by the
-  API;
-- preserve accents and safe Unicode characters;
-- write the season and episode with at least two digits inside the combined
-  segment (`S01E02`, `S10E03`); larger numbers must not be truncated;
-- preserve the selected source video's extension and write it in lowercase;
-- do not include the episode title in the MVP;
-- do not include information that was not obtained from the confirmed TMDB item.
-
-### Mandatory title normalization
-
-The raw TMDB title must never be placed directly into a filename. Every title
-must pass through one deterministic function, conceptually named
-normalize_title_for_filename, before the final filename is assembled.
-
-The normalization pipeline is:
-
-1. preserve the original TMDB title for display and metadata;
-2. trim leading and trailing Unicode whitespace;
-3. replace filesystem-invalid characters and control characters, including /, \,
-   :, *, ?, ", <, >, and |, with a safe separator;
-4. replace the reserved `__S__` delimiter and its case variations with a safe
-   separator;
-5. use a readable separator such as " - " for replacements, so Mission:
-   Impossible becomes Mission - Impossible;
-6. collapse accidental repeated spaces or replacement separators;
-7. remove trailing spaces, periods, and replacement separators;
-8. preserve accents and safe Unicode characters;
-9. avoid Windows-reserved filename components when Windows support is claimed;
-10. shorten only the title component if the operating system path limit requires
-    it;
-11. reject the plan if normalization produces an empty title instead of
-    inventing an unverified title.
-
-Examples:
-
-```text
-Mission: Impossible       -> Mission - Impossible
-Spider-Man: No Way Home   -> Spider-Man - No Way Home
-What?                     -> What
-Title / Director          -> Title - Director
-A__S__B                   -> A - B
-```
-
-Normalization must be deterministic and idempotent:
-
-```text
-normalize_title_for_filename(normalize_title_for_filename(title))
-    == normalize_title_for_filename(title)
-```
-
-Normalization may change only the title component. It must never change the TMDB
-ID, media type, season, episode, extension, or the original metadata value held
-in memory.
-
-### Collisions
-
-The destination path is calculated before execution. The following are
-conflicts:
-
-- two files in the same plan produce the same destination;
-- the destination already exists;
-- the source and destination are the same file;
-- two files receive the same series + season + episode combination.
-
-The default behavior for any conflict is to block confirmation and request a
-correction. The program must not:
-
-- overwrite;
-- add arbitrary suffixes such as (1);
-- delete the existing file;
-- silently choose another name.
-
-Support for overwriting or automatic conflict resolution must be a future,
-explicit decision.
-
-## TMDB Integration
-
-### Startup configuration and credentials
-
-The normal interactive run must load the TMDB API key and metadata language from
-the per-user configuration file before asking for the destination or discovering
-any folders. The API key prompt, when required, must be masked and must never
-echo the secret.
-
-The startup configuration sequence is:
-
-1. resolve `~/.title-tmdb-file/config.json` in the current user's home
-   directory;
-2. load the JSON file, treating a missing file as an empty configuration;
-3. ask only for missing or invalid fields, with the API key before the language
-   when both are needed;
-4. save the complete configuration after successful local validation;
-5. validate the key and language with TMDB;
-6. only then continue to destination and unified media-tree selection.
-
-The `title-tmdb-file config` command deliberately skips the media workflow and
-reopens both fields so the user can replace the saved values. It uses the same
-prompt, validation, and persistence code as the normal startup path.
-
-The environment may provide defaults for convenience:
-
-```bash
-# Optional masked default for the first startup prompt
-export TMDB_API_KEY="your-key"
-
-# Optional default for the second startup prompt
-export TMDB_LANGUAGE="pt-BR"
-```
-
-Environment values are fallback defaults only when the corresponding saved field
-is unavailable. They do not bypass a required prompt. A complete saved
-configuration takes precedence over both environment variables during a normal
-run.
-
-Rules:
-
-- persist the API key only in the documented per-user configuration file after
-  the user accepts it;
-- keep the API key in memory only while the current execution is using it;
-- never show it in a preview, error, debug representation, log, or report;
-- never place it in a filename, operation plan, or any persistent state other
-  than the documented configuration file;
-- validate the key before filesystem selection;
-- allow retry or cancellation when validation fails;
-- keep all API-key handling out of the domain and filename modules;
-- do not put credentials directly in Cargo.toml, the source code, or this
-  README.
-
-The selected TMDB language must be chosen through an English prompt. It controls
-the language of metadata returned by TMDB, especially the title used in
-generated filenames; it does not translate the CLI.
-
-### Configuration file safety
-
-The configuration file contains the API key in JSON because the CLI must reuse
-it on later runs. The application should create the containing directory with
-owner-only permissions where the platform supports them and should create the
-file with owner read/write permissions (`0700` for the directory and `0600` for
-the file on Unix-like systems). The application must never print the file
-contents, include the key in diagnostics, or commit the file to the repository.
-A malformed file must stop the normal workflow with an actionable error;
-`title-tmdb-file config` may replace it after the user explicitly completes the
-configuration prompts.
-
-### TMDB endpoints
-
-The integration must use the TMDB v3 API with the user-selected language and
-include_adult=false for searches. The initial default is pt-BR.
-
-Required operations:
-
-| Operation            | Endpoint                                                              | Purpose                                               |
-| -------------------- | --------------------------------------------------------------------- | ----------------------------------------------------- |
-| Validate credentials | GET /3/configuration                                                  | Verify the configured API key before media discovery. |
-| Search movies        | GET /3/search/movie                                                   | Find movie candidates.                                |
-| Search series        | GET /3/search/tv                                                      | Find TV series candidates.                            |
-| Movie details        | GET /3/movie/{movie_id}                                               | Confirm the ID and obtain the final title.            |
-| Series details       | GET /3/tv/{series_id}                                                 | Confirm the ID and obtain the final title.            |
-| Episode details      | GET /3/tv/{series_id}/season/{season_number}/episode/{episode_number} | Validate the season/episode combination.              |
-
-Search results must be filtered to movies and TV series. People, keywords, and
-other types must not appear as identification options.
-
-### Request rules
-
-- every non-empty live-search query must be performed after the debounce
-  interval, with no request made for the empty query or a query shorter than two
-  non-whitespace characters;
-- do not maintain persistent caching in the MVP;
-- an in-memory cache may be used during one execution to avoid repeating the
-  same request;
-- use a finite timeout;
-- handle authentication failures, missing items, rate limits, server errors, and
-  lack of network access;
-- do not proceed with an item whose details were not confirmed;
-- when there are too many results, limit the displayed set and allow a new
-  search;
-- the displayed text may be localized, but the ID returned by TMDB is
-  authoritative.
-
-A network failure during identification must leave the source file untouched.
-The application must not copy or move a file without being able to build and
-validate its final name.
-
-### Attribution
-
-The product must display the attribution required by TMDB in the interface or
-distribution documentation, according to the current rules. Official references
-are listed in the [References](#references) section.
-
-## File and Safety Rules
-
-### The operation is an explicit copy or move
-
-The user chooses the operation before destination and media selection. The
-selected mode is part of the immutable plan and cannot change between preview
-and execution.
-
-For a copy, the expected result is:
-
-```text
-source file --(copy + rename)--> destination file
-```
-
-The source file must remain present and unchanged. The destination must be an
-independent copy, not a hard link or another alias of the source.
-
-For a move, the expected result is:
-
-```text
-source file --(move + rename)--> destination file
-```
-
-After a successful move, the original file must no longer remain in the source
-folder. In both modes, the video contents must not be re-encoded or modified.
-
-### Mandatory pre-validation
-
-Before confirmation, validate every item:
-
-- the source folder still exists;
-- each file still exists and is the same file that was selected;
-- each file is still a regular file with a recognized video extension;
-- each generated filename preserves the selected source video's extension in
-  lowercase;
-- the destination exists or can be created;
-- the destination is writable;
-- no calculated destination already exists;
-- no destination is duplicated within the plan;
-- no file was selected twice;
-- all IDs and metadata were confirmed by TMDB;
-- all series season/episode combinations are valid;
-- no path exceeds relevant operating-system limits.
-
-If pre-validation fails, do not copy or move any file in that plan.
-
-### Safe copy and move execution
-
-Copy operations always write source bytes to a destination-side temporary file,
-verify the copy, and publish it with no-replace behavior. They must never remove
-or mutate the source, regardless of whether source and destination are on the
-same volume.
-
-Move operations on the same filesystem may use the safe no-replace hard-link
-publication currently implemented by the adapter, followed by source removal
-only after revalidation. This is a logical move and therefore reports the
-file's bytes as complete when the operation succeeds.
-
-When a move crosses volumes, the implementation must:
-
-1. copy to a temporary file inside the destination folder;
-2. verify that the copy completed;
-3. publish the temporary file under the final name with no-replace behavior;
-4. remove the original file only afterward;
-5. remove the temporary file if any step fails.
-
-The temporary file must never appear under the final name before the copy is
-ready. If the copy cannot be verified, preserve the source and report the
-failure.
-
-The current filesystem adapter uses the same destination-side temporary-copy
-and verification path for explicit copies and cross-volume move fallbacks.
-Automatic move execution uses the cross-volume path when the operating system
-reports a cross-device error. If the host filesystem cannot provide the
-required no-replace primitive, the operation fails closed instead of falling
-back to an overwriting rename.
-
-### Byte-based progress
-
-After confirmation, calculate the total source bytes in the immutable plan. The
-progress bar must report:
-
-```text
-percentage = completed_or_transferred_bytes / total_plan_bytes * 100
-```
-
-For copies and cross-volume moves, update the bar while bytes are written to
-the temporary destination file. For same-volume moves, update the bar when each
-no-replace move completes because no byte copy occurs. The progress is
-aggregate across the complete plan, not merely a count of files, so a large
-file contributes proportionally more than a small file. A zero-byte file is
-treated as complete when its operation is successfully published.
-
-### Failures during execution
-
-The complete plan must be pre-validated, but execution does not need to be
-transactional across volumes.
-
-If an unexpected failure occurs after some files have already been processed:
-
-- stop new copies or moves by default;
-- do not overwrite or delete destinations;
-- report which files completed, which failed, and which remain pending;
-- keep unprocessed source files in place, and keep every source file in place
-  for copy operations;
-- allow a later execution to continue after the issue is fixed, treating
-  existing destinations as conflicts.
-
-### Cancellation
-
-Canceling at any prompt before confirmation causes no changes. During a copy or
-move that has already started, the application must finish the current file
-operation or fail safely; it must not leave the source and destination in an
-ambiguous state without reporting it.
-
-## How to Retrieve the Data in the Future
-
-There will be no local database in the MVP. The filename is the minimum index
-for locating the data again.
-
-### Parsing contract
-
-The pure parser in `src/naming.rs` already implements this contract for
-generated filenames. A future user-facing metadata command may use the parsed ID
-and media type to query TMDB again, but it must still treat the title as a
-display hint rather than authoritative metadata.
-
-The parser recognizes:
-
-```text
-Movie:   ^(?<id>[0-9]+)__S__MOVIE__S__(?<title>.+)\.(?<extension>[A-Za-z0-9-]+)$
-Series:  ^(?<id>[0-9]+)__S__SERIES__S__S(?<season>[0-9]+)E(?<episode>[0-9]+)__S__(?<title>.+)\.(?<extension>[A-Za-z0-9-]+)$
-```
-
-The canonical parser first splits the filename stem on `__S__` and then
-validates the expected field count and fixed media-type/season/episode markers.
-A movie produces three fields (`id`, `MOVIE`, `title`); a series produces four
-fields (`id`, `SERIES`, `S<season>E<episode>`, `title`). The parser splits the
-combined series field at its `E` marker to recover the season and episode. The
-title field may contain ordinary hyphens, spaces, periods, or other safe
-characters, but never the reserved delimiter.
-
-The actual expression must treat the extension case-insensitively when reading
-external files, validate it against the supported video-extension policy, and
-normalize the generated extension to lowercase. The parser must preserve the
-recovered extension because a future operation may need to retain the video's
-format.
-
-The parser must produce a reference equivalent to:
-
-```text
-{
-  tmdb_id: 1399,
-  media_type: tv,
-  season: 1,
-  episode: 1,
-  title_hint: "Game of Thrones",
-  video_extension: "mp4"
-}
-```
-
-Authority rules:
-
-- the TMDB ID is the source of truth;
-- season and episode are the source of truth for an episode;
-- the title in the filename is a readable copy and may become outdated;
-- a future synchronization command must query TMDB again by ID, rather than
-  trusting only the title text;
-- the type is read from the explicit `MOVIE` or `SERIES` field, but ID lookups
-  must still validate the type through the API.
-
-## Planned Architecture
-
-The interactive interface must be separated from business rules. clap is
-mandatory for command-line parsing, help, version output, and argument
-validation. A dedicated interactive terminal layer should provide prompts,
-multiple selection, confirmation, progress, and visual presentation. Its exact
-library may be selected during implementation, but it must remain behind the CLI
-boundary and must not replace clap.
-
-Expected responsibilities:
-
-```text
-clap command layer
-        |
-        v
-interactive terminal layer
-        |
-        v
-Organization use case
-        |
-        +--> filesystem adapter
-        +--> TMDB client
-        +--> filename generator/parser
-        +--> plan validator and executor
-```
-
-Principles:
-
-- the interface layer collects choices and displays state;
-- the domain must not depend on prompts;
-- the selected `FileOperation` must remain in the plan from the first operation
-  prompt through execution and reporting;
-- the TMDB client must not copy or move files;
-- the filesystem adapter must not decide which title to use;
-- the filename generator must be deterministic and testable without a network;
-- the executor must perform only an already validated and confirmed copy-or-move
-  plan;
-- the filesystem adapter must expose transfer progress as aggregate byte counts,
-  not only file counts;
-- errors must be typed well enough to produce useful messages without exposing
-  credentials.
-
-## Folder Structure
-
-### Current state
-
-```text
-title-tmdb-file/
+tmdbtag/
 ├── Cargo.toml
 ├── Cargo.lock
 ├── README.md
 ├── AGENTS.md
-├── tasks/
-│   ├── README.md
-│   ├── 01-cli-foundation-and-interactive-shell.md
-│   ├── 02-tmdb-configuration-and-identification.md
-│   ├── 03-filesystem-discovery-and-media-selection.md
-│   ├── 04-naming-normalization-and-metadata-recovery.md
-│   └── 05-plan-preview-and-safe-file-movement.md
 └── src/
-    ├── main.rs
-    ├── app.rs
-    ├── cli.rs
-    ├── config.rs
-    ├── domain.rs
-    ├── error.rs
-    ├── ui.rs
-    ├── filesystem.rs
-    ├── naming.rs
+    ├── main.rs          # Thin process entry point and exit-code mapping
+    ├── app.rs           # Workflow orchestration
+    ├── cli.rs           # clap commands and concrete terminal interaction
+    ├── config.rs        # Per-user configuration loading, prompting, and persistence
+    ├── domain.rs        # Stable types and validated application concepts
+    ├── error.rs         # Actionable typed errors
+    ├── filesystem.rs    # Discovery, path validation, safe execution, and progress events
+    ├── naming.rs        # Pure filename generation, normalization, and parsing
+    ├── ui.rs            # Renderer-neutral interaction and progress contracts
     └── tmdb/
         ├── mod.rs
-        ├── client.rs
-        └── models.rs
+        ├── client.rs    # HTTP transport and TMDB endpoint calls
+        └── models.rs    # API response mappings
 ```
 
-### Suggested target structure
+The application is a binary, but the business rules are kept independent from a real terminal,
+real filesystem, real network, and real credentials wherever practical. This makes naming,
+parsing, planning, collision detection, configuration, and error behavior straightforward to test.
 
-```text
-title-tmdb-file/
-├── Cargo.toml
-├── Cargo.lock
-├── README.md
-├── AGENTS.md
-├── tasks/
-│   ├── README.md
-│   ├── 01-cli-foundation-and-interactive-shell.md
-│   ├── 02-tmdb-configuration-and-identification.md
-│   ├── 03-filesystem-discovery-and-media-selection.md
-│   ├── 04-naming-normalization-and-metadata-recovery.md
-│   └── 05-plan-preview-and-safe-file-movement.md
-├── src/
-│   ├── main.rs              # binary entry point and exit code
-│   ├── app.rs               # orchestration of the complete flow
-│   ├── cli.rs               # clap parser and terminal renderer
-│   ├── config.rs            # per-user JSON config, prompts, and local validation
-│   ├── domain.rs            # media, selection, and plan types
-│   ├── error.rs             # application errors
-│   ├── ui.rs                # renderer-neutral terminal interaction contracts
-│   ├── filesystem.rs        # discovery, validation, safe copy/move, and byte progress
-│   ├── naming.rs            # title normalization, filename generation, and parsing
-│   └── tmdb/
-│       ├── mod.rs
-│       ├── client.rs        # HTTP requests and timeouts
-│       └── models.rs        # API responses and internal models
-└── tests/
-    ├── naming.rs
-    ├── parser.rs
-    ├── filesystem.rs
-    └── fixtures/
-```
+The principal dependencies are deliberately focused:
 
-Task 01 and Task 02 currently implement `clap` for command parsing, `dialoguer`
-for password/text/select/multi-select controls, `crossterm` for polled raw
-keyboard events in the live TMDB selector, `indicatif` for activity feedback,
-`reqwest` with Rustls for bounded HTTPS requests, and `serde`/`serde_json` for
-the documented configuration and TMDB response mappings. These libraries are
-implementation details behind the CLI/UI/TMDB boundaries and may be replaced
-only after the interaction contract, safety guarantees, and user experience are
-preserved.
+- `clap` for command parsing, help, version, and command diagnostics;
+- `dialoguer` and `crossterm` for polished keyboard interaction and live selection;
+- `indicatif` for spinners and transfer progress;
+- `reqwest` with Rustls for bounded HTTPS communication;
+- `serde` and `serde_json` for the explicit configuration and API models;
+- `thiserror` for typed, actionable errors.
 
-This is a suggested organization, not a requirement to create every file
-immediately. The important rule is to keep the UI, TMDB, filesystem, and
-filename-composition concerns decoupled.
+## Development
 
-## Configuration and Execution
-
-### Prerequisites
-
-- Rust compatible with the edition defined in Cargo.toml;
-- an interactive terminal;
-- an internet connection for TMDB queries;
-- a TMDB API key configured through the first-run prompts or
-  `title-tmdb-file config`;
-- read permissions for sources and write permissions for the destination.
-
-### Development execution
+Format, compile, lint, and test the project with:
 
 ```bash
-cargo run
+cargo fmt --all -- --check
+cargo check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test
 ```
 
-Open or update the saved TMDB configuration without starting media selection:
+Tests should cover pure transformations first, followed by filesystem behavior and HTTP behavior
+behind local test doubles. Tests must not require a real TMDB key, real media directories, or live
+network data.
 
-```bash
-cargo run -- config
-```
+When changing behavior, update this README as part of the same change. It is the product contract:
+it should explain what the tool promises to users, what it refuses to do, how its filenames can be
+interpreted later, and which safety guarantees must remain intact.
 
-Optimized execution, once the binary is implemented:
+## License and TMDB attribution
 
-```bash
-cargo run --release
-```
-
-The MVP is interactive and does not require source path arguments: the current
-directory is used automatically. The normal command reuses a complete
-configuration from `~/.title-tmdb-file/config.json`; use `config` when both
-saved values need to be edited. clap must still provide --help and --version.
-Non-interactive options such as --source, --destination, or --dry-run may be
-added only after a separate specification exists for them.
-
-The command-line help and version paths can be exercised during development
-with:
-
-```bash
-cargo run -- --help
-cargo run -- --version
-```
-
-### Secrets
-
-The CLI stores the accepted TMDB API key in the per-user file
-`~/.title-tmdb-file/config.json` so later runs can start without asking for it
-again. This file is local application state, not a repository file:
-
-- never commit it or copy it into the project;
-- do not print its contents or include the key in logs, errors, previews, or
-  debug output;
-- keep the directory and file owner-only where the operating system supports
-  permissions;
-- use `title-tmdb-file config` to replace the saved values;
-- environment variables are optional fallback defaults for missing fields, not a
-  second persistent configuration store.
-
-## Errors and Exit Codes
-
-Messages must be short, actionable, and must not expose tokens.
-
-Minimum categories:
-
-- unreadable current directory;
-- unavailable, unreadable, malformed, or unwritable per-user configuration file;
-- invalid destination path;
-- folder with no eligible video files;
-- invalid ID, season, or episode input;
-- missing or rejected credential;
-- item not found in TMDB;
-- network error or API rate limit;
-- missing source file;
-- destination already exists;
-- insufficient permissions;
-- failure while moving between volumes.
-
-Planned codes:
-
-| Code | Meaning                                                                                             |
-| ---: | --------------------------------------------------------------------------------------------------- |
-|    0 | Operation completed or was canceled before any change.                                              |
-|    1 | API, filesystem, or execution failure; some items may have completed and others may remain pending. |
-|    2 | Invalid usage/configuration or pre-validation failure with no changes.                              |
-
-A detailed error backtrace may be enabled during development, but normal output
-should prioritize a message that is understandable to the person organizing the
-files.
-
-## Acceptance Criteria
-
-The MVP is complete only when all of the following criteria are met:
-
-- [x] Use clap for command-line parsing, --help, --version, and argument
-      diagnostics.
-- [x] Keep all application-owned code and user-facing text in English.
-- [x] Provide a polished, keyboard-friendly, searchable, and responsive
-      interactive terminal experience.
-- [x] Load `~/.title-tmdb-file/config.json` before the normal interactive
-      workflow.
-- [x] Ask for the TMDB API key first only when the saved API key is missing or
-      invalid.
-- [x] Ask for the TMDB metadata language next only when the saved language is
-      missing or invalid.
-- [x] Skip both startup prompts when both saved fields are valid.
-- [x] Persist a complete configuration without exposing the API key in
-      application output.
-- [x] Provide `title-tmdb-file config` to deliberately edit and save both
-      fields.
-- [x] Validate the API key and language before filesystem discovery.
-- [x] Start in the current directory without requiring a separate source-folder
-      configuration.
-- [x] Ask whether the selected videos should be copied or moved before
-      destination and media selection.
-- [x] Ask for the destination after startup configuration and before scanning
-      media.
-- [x] Recursively discover recognized video files from the current directory and
-      its real subfolders.
-- [x] Include video files directly in the current directory.
-- [x] Exclude the destination and its descendants from discovery.
-- [x] Show one expandable, collapsed-by-default video explorer.
-- [x] Expand and collapse folders with `Tab` and select individual videos with
-      `Space`.
-- [x] Show filesystem paths as relative display paths while retaining exact
-      paths internally.
-- [x] Allow multiple-file selection.
-- [x] Run a separate confirmed TMDB identification loop for every selected video
-      file.
-- [x] Search movies and series in real time.
-- [x] Allow the user to enter an ID and type manually.
-- [x] Display the type and title before using the data.
-- [x] Ask separately for season and episode for each series file.
-- [x] Generate exactly the documented filename pattern.
-- [x] Separate every recoverable metadata field with the reserved `__S__`
-      delimiter.
-- [x] Prevent the reserved delimiter, including case variations, from appearing
-      in normalized titles.
-- [x] Normalize titles for filenames, including replacing invalid characters
-      such as colon, without losing the ID, season, or episode.
-- [x] Detect collisions before execution.
-- [x] Never overwrite an existing destination.
-- [x] Show a complete preview.
-- [x] Require explicit confirmation with a negative default.
-- [x] Copy files without modifying or removing their sources.
-- [x] Move files only after safe destination publication and source
-      revalidation.
-- [x] Show aggregate byte-based progress for both copying and moving.
-- [x] Preserve the source when an unverified cross-volume copy fails.
-- [x] Report success, failure, and pending items per file.
-- [x] Allow the ID, type, and episode to be recovered from the generated
-      filename.
-- [x] Have automated tests for naming, parsing, validation, safe copy/move
-      execution, and byte progress.
-
-## Testing Strategy
-
-### Unit tests
-
-- sanitization of invalid characters;
-- titles with accents and Unicode;
-- Windows-reserved names;
-- season and episode padding;
-- movie and series filename generation;
-- parsing generated filenames;
-- rejection of invalid IDs;
-- collision detection.
-
-### Filesystem tests
-
-Use temporary directories to verify:
-
-- unified source-root discovery of regular files with case-insensitive
-  recognized video extensions;
-- root-level and nested video discovery;
-- symbolic-link and nested-directory safety during video discovery;
-- relative path labels for explorer rows, nested video files, and preview
-  entries;
-- exclusion of the destination subtree from the explorer;
-- collapsed/expanded tree construction and explicit file selection;
-- same-volume movement;
-- explicit copy mode with source preservation and independent destination data;
-- aggregate byte progress for copy and move execution;
-- existing-destination behavior;
-- source preservation on failure;
-- absence of overwrites.
-
-### TMDB client tests
-
-- use simulated HTTP responses;
-- test movie and series searches;
-- test lookup by ID;
-- test valid and invalid episodes;
-- test missing credentials, 401, 404, 429, 5xx, and timeout;
-- do not depend on the real API in automated tests.
-
-### Manual acceptance test
-
-Before a usable release, test at least:
-
-1. one root-level video selected from the explorer;
-2. one directory tree containing multiple independent movie files;
-3. one directory tree containing multiple episodes of a series, with
-   identification repeated per file;
-4. root-level and nested videos selected together in the same explorer;
-5. a destination outside the current directory;
-6. a destination inside the current directory;
-7. a title with characters invalid for filenames;
-8. cancellation during selection and confirmation;
-9. a destination that already contains an identical name;
-10. source and destination on different volumes, when the environment allows it.
-
-## Implementation Tasks
-
-The implementation scope is intentionally divided into five cohesive tasks
-rather than many small tickets. Each task owns one meaningful capability and
-includes its own implementation boundaries, tests, safety requirements, and
-acceptance checklist.
-
-The recommended task order and dependencies are documented in
-[`tasks/README.md`](tasks/README.md):
-
-1. [CLI foundation and interactive terminal shell](tasks/01-cli-foundation-and-interactive-shell.md)
-2. [TMDB configuration and identification](tasks/02-tmdb-configuration-and-identification.md)
-3. [Filesystem discovery and media selection](tasks/03-filesystem-discovery-and-media-selection.md)
-4. [Naming normalization and metadata recovery](tasks/04-naming-normalization-and-metadata-recovery.md)
-5. [Plan, preview, and safe file operations](tasks/05-plan-preview-and-safe-file-movement.md)
-
-These task files are execution guidance derived from this README. They do not
-replace this product contract. If implementation reveals a necessary behavior
-change, update the README, the relevant task, and AGENTS.md together before
-treating the change as intentional.
-
-## Roadmap
-
-The detailed implementation breakdown is maintained in
-[Implementation Tasks](tasks/README.md). The roadmap below provides the
-higher-level product phases; the task files provide the actionable scope within
-those phases.
-
-### Phase 0 — Specification
-
-- [x] Define the objective, flow, filename rules, and MVP limits.
-- [x] Document the API contract and safety rules.
-
-### Phase 1 — Interactive skeleton
-
-- [x] Implement the clap command parser and verify its help/version output.
-- [x] Choose and validate the dedicated interactive terminal UI library.
-- [x] Implement discovery of the current directory and destination.
-- [x] Implement one unified expandable explorer for root-level and recursively
-      nested videos.
-- [x] Implement cancellation and local validation.
-
-### Phase 2 — TMDB
-
-- [x] Implement per-user credential persistence and the shared configuration
-      wizard.
-- [x] Implement movie and series searches.
-- [x] Implement ID confirmation.
-- [x] Implement details and episode validation.
-
-### Phase 3 — Plan and file operations
-
-- [x] Implement domain models.
-- [x] Implement sanitization and filename generation.
-- [x] Implement independent per-video TMDB identification during plan
-      construction.
-- [x] Implement preview and conflict detection.
-- [x] Implement explicit copy-or-move selection and immutable operation-mode
-      planning.
-- [x] Implement independent destination copies that preserve source files.
-- [x] Implement aggregate byte-based transfer progress.
-- [x] Implement same-volume movement.
-- [x] Implement safe cross-volume copying.
-- [x] Implement the final report.
-
-### Phase 4 — Retrieval and extensions
-
-- [x] Implement parsing of generated filenames.
-- [ ] Add a separate command to query metadata from a filename.
-- [ ] Evaluate non-interactive mode and --dry-run.
-- [ ] Evaluate richer explorer filtering, subtitles, and auxiliary files.
-- [ ] Evaluate undo/operation logs without changing the MVP's safe behavior.
-
-## References
-
-- [TMDB — application authentication](https://developer.themoviedb.org/docs/authentication-application)
-- [TMDB — API getting started](https://developer.themoviedb.org/reference/intro/getting-started)
-- [TMDB — movie search](https://developer.themoviedb.org/reference/search-movie)
-- [TMDB — TV search](https://developer.themoviedb.org/reference/search-tv)
-- [TMDB — movie details](https://developer.themoviedb.org/reference/movie-details)
-- [TMDB — TV series details](https://developer.themoviedb.org/reference/tv-series-details)
-- [TMDB — episode details](https://developer.themoviedb.org/reference/tv-episode-details)
-- [TMDB — FAQ and general API rules](https://developer.themoviedb.org/docs/faq)
-
-The name “TMDB” must be used consistently. The application must follow the
-current authentication, attribution, rate-limit, and API-use rules described in
-the official documentation.
+`tmdbtag` is an independent tool and is not endorsed, sponsored, or certified by TMDB. TMDB data,
+branding, and API access remain subject to TMDB's own terms. See the official [TMDB website](https://www.themoviedb.org/),
+[API documentation](https://developer.themoviedb.org/docs), and [API terms of use](https://www.themoviedb.org/api-terms-of-use)
+for the authoritative policies.

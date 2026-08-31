@@ -28,7 +28,7 @@ pub enum ConfigError {
     },
     /// The configuration file is not valid JSON or does not match the supported schema.
     #[error(
-        "The TMDB configuration file at {path} is invalid: {source}. Run `title-tmdb-file config` to replace it."
+        "The TMDB configuration file at {path} is invalid: {source}. Run `tmdbtag config` to replace it."
     )]
     InvalidFile {
         /// The path containing invalid data.
@@ -87,9 +87,7 @@ pub enum TmdbError {
     #[error("The TMDB base URL is invalid.")]
     InvalidBaseUrl,
     /// TMDB rejected the configured credential.
-    #[error(
-        "TMDB authentication failed (HTTP {status}). Check the API key with `title-tmdb-file config`."
-    )]
+    #[error("TMDB authentication failed (HTTP {status}). Check the API key with `tmdbtag config`.")]
     Authentication {
         /// The HTTP status returned by TMDB.
         status: u16,

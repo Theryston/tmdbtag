@@ -76,7 +76,7 @@ impl TmdbClient {
 
         let http = Client::builder()
             .timeout(timeout)
-            .user_agent(concat!("title-tmdb-file/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("tmdbtag/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|error| TmdbError::ClientBuild {
                 message: error.to_string(),

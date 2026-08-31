@@ -36,11 +36,11 @@ const TMDB_LIVE_SEARCH_RESERVED_LINES: usize = 6;
 /// Command-line arguments for the default interactive workflow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Parser)]
 #[command(
-    name = "title-tmdb-file",
+    name = "tmdbtag",
     version,
     about = "Organize video files with verified TMDB metadata.",
     long_about = "A polished interactive CLI for selecting video files, identifying movies or TV series in TMDB, and preparing safe metadata-bearing filenames.",
-    after_help = "Examples:\n  title-tmdb-file\n  title-tmdb-file config\n  title-tmdb-file --help\n  title-tmdb-file --version"
+    after_help = "Examples:\n  tmdbtag\n  tmdbtag config\n  tmdbtag --help\n  tmdbtag --version"
 )]
 pub struct Cli {
     /// Optional explicit command. Omitting it starts the organization wizard.
@@ -787,7 +787,7 @@ impl InteractiveUi for TerminalUi {
         self.write_line("")?;
         self.write_line(&format!(
             "{} {}",
-            dialoguer::console::style("title-tmdb-file").cyan().bold(),
+            dialoguer::console::style("tmdbtag").cyan().bold(),
             dialoguer::console::style(format!("v{version}")).dim()
         ))?;
         self.write_line(&format!(
@@ -1485,20 +1485,20 @@ mod tests {
 
     #[test]
     fn default_invocation_parses_without_arguments() {
-        let parsed = Cli::try_parse_from(["title-tmdb-file"]).unwrap();
+        let parsed = Cli::try_parse_from(["tmdbtag"]).unwrap();
         assert_eq!(parsed.command, None);
     }
 
     #[test]
     fn config_subcommand_is_owned_by_clap() {
-        let parsed = Cli::try_parse_from(["title-tmdb-file", "config"]).unwrap();
+        let parsed = Cli::try_parse_from(["tmdbtag", "config"]).unwrap();
 
         assert_eq!(parsed.command, Some(CliCommand::Config));
     }
 
     #[test]
     fn help_is_owned_by_clap() {
-        let error = Cli::try_parse_from(["title-tmdb-file", "--help"]).unwrap_err();
+        let error = Cli::try_parse_from(["tmdbtag", "--help"]).unwrap_err();
 
         assert_eq!(error.kind(), ErrorKind::DisplayHelp);
         assert!(error.to_string().contains("A polished interactive CLI"));
@@ -1508,7 +1508,7 @@ mod tests {
 
     #[test]
     fn version_is_owned_by_clap() {
-        let error = Cli::try_parse_from(["title-tmdb-file", "--version"]).unwrap_err();
+        let error = Cli::try_parse_from(["tmdbtag", "--version"]).unwrap_err();
 
         assert_eq!(error.kind(), ErrorKind::DisplayVersion);
         assert!(error.to_string().contains(env!("CARGO_PKG_VERSION")));
@@ -1516,7 +1516,7 @@ mod tests {
 
     #[test]
     fn invalid_arguments_return_a_clap_usage_error() {
-        let error = Cli::try_parse_from(["title-tmdb-file", "--unknown-option"]).unwrap_err();
+        let error = Cli::try_parse_from(["tmdbtag", "--unknown-option"]).unwrap_err();
 
         assert_eq!(error.kind(), ErrorKind::UnknownArgument);
     }

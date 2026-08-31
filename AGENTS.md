@@ -3,7 +3,7 @@
 ## Purpose
 
 This file defines the engineering rules for agents and contributors working on
-the title-tmdb-file repository.
+the tmdbtag repository.
 
 The project is a small Rust CLI that interactively selects video files,
 identifies each selected video as a movie or TV series through The Movie
@@ -45,22 +45,14 @@ elegant.
 
 ## Repository status
 
-The repository currently contains the initial implementation boundaries and task
-breakdown:
+The repository contains the following implementation boundaries:
 
 ```text
-title-tmdb-file/
+tmdbtag/
 ├── Cargo.toml
 ├── Cargo.lock
 ├── README.md
 ├── AGENTS.md
-├── tasks/
-│   ├── README.md
-│   ├── 01-cli-foundation-and-interactive-shell.md
-│   ├── 02-tmdb-configuration-and-identification.md
-│   ├── 03-filesystem-discovery-and-media-selection.md
-│   ├── 04-naming-normalization-and-metadata-recovery.md
-│   └── 05-plan-preview-and-safe-file-movement.md
 └── src/
     ├── main.rs
     ├── app.rs
@@ -99,7 +91,7 @@ coding.
 
 The normal interactive run has a mandatory startup configuration stage before
 any destination or media discovery. The stage is backed by the per-user file
-`~/.title-tmdb-file/config.json` (or the equivalent current-user home path on
+`~/.tmdbtag/config.json` (or the equivalent current-user home path on
 Windows).
 
 Required order:
@@ -576,7 +568,7 @@ keyboard navigation, multiple selection, search, styling, terminal fallback,
 maintenance, and platform support. Do not invent a package name or put an
 unverified crate into Cargo.toml.
 
-Task 01 selected `clap` for command parsing, `dialoguer` for standard
+The current implementation uses `clap` for command parsing, `dialoguer` for standard
 interactive prompts and keyboard selection, `crossterm` for polled raw keyboard
 events in the live TMDB selector, `indicatif` for spinner/progress feedback, and
 `thiserror` for typed errors. The configuration and TMDB follow-up adds `serde`
@@ -722,7 +714,7 @@ config.rs should contain configuration parsing and normalization.
 
 It should handle:
 
-- the standard per-user configuration path (`~/.title-tmdb-file/config.json`,
+- the standard per-user configuration path (`~/.tmdbtag/config.json`,
   with the platform's home-directory convention);
 - loading optional JSON fields so missing configuration can be detected;
 - writing a complete JSON configuration with safe file permissions;
@@ -874,7 +866,7 @@ The filesystem layer should not:
 - create arbitrary conflict suffixes;
 - invoke shell commands such as mv, cp, or powershell move commands.
 
-Task 03's discovery functions are read-only. They must not create the deferred
+Discovery functions are read-only. They must not create the deferred
 destination or perform any rename, copy, delete, or move. The application layer
 may prompt for the destination and selections, but it must retain the exact
 `PathBuf` values returned by this adapter for later near-commit revalidation.
@@ -1132,7 +1124,7 @@ diagnostics.
 The default command is the interactive wizard:
 
 ```text
-title-tmdb-file
+tmdbtag
 ```
 
 The initial clap contract must provide:
@@ -1743,7 +1735,7 @@ Use temporary directories for:
 - source preservation after failures;
 - report contents after partial execution.
 
-The current Task 05 suite also forces the cross-volume executor through its test
+The filesystem test suite also forces the cross-volume executor through its test
 seam so it can prove temporary-copy verification and cleanup without requiring a
 particular mounted volume.
 
@@ -1974,7 +1966,7 @@ necessary for safety or testability.
 ### Secrets
 
 - Store the accepted TMDB API key only in the documented per-user
-  `~/.title-tmdb-file/config.json` file and in memory for the current execution;
+  `~/.tmdbtag/config.json` file and in memory for the current execution;
   this persistence is an explicit product requirement.
 - Read `TMDB_API_KEY` only as a masked fallback default when the saved key is
   unavailable; it must not bypass a required prompt.
@@ -2074,24 +2066,6 @@ Update this file when changing:
 - safety guarantees.
 
 Do not use AGENTS.md to hide product behavior that belongs in README.md.
-
-### tasks/
-
-Keep the task breakdown synchronized with the product specification and
-implementation state.
-
-- Update the relevant task when its scope, dependency, acceptance criteria, or
-  implementation boundary changes.
-- Keep task status honest; a checklist item is not complete because a module or
-  placeholder exists.
-- Do not create duplicate micro-tasks for individual functions, tests, or
-  formatting work.
-- Keep capability-specific tests and verification requirements in the task that
-  owns the capability.
-- If a product decision changes behavior, update README.md first, then update
-  the affected task and this file when engineering rules also change.
-- Preserve the dependency order documented in `tasks/README.md`, unless the
-  change is intentional and documented.
 
 ### Architecture decisions
 

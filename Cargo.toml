@@ -1,5 +1,5 @@
 [package]
-name = "title-tmdb-file"
+name = "tmdbtag"
 version = "0.1.0"
 edition = "2024"
 

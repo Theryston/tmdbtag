@@ -19,7 +19,7 @@ use crate::{
 pub const DEFAULT_TMDB_LANGUAGE: &str = "pt-BR";
 
 /// The directory created in the current user's home directory for application configuration.
-pub const CONFIG_DIRECTORY_NAME: &str = ".title-tmdb-file";
+pub const CONFIG_DIRECTORY_NAME: &str = ".tmdbtag";
 
 /// The JSON file containing the user's TMDB configuration.
 pub const CONFIG_FILE_NAME: &str = "config.json";

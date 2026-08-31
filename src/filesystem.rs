@@ -1158,12 +1158,7 @@ fn copy_and_publish(
 fn create_temporary_file(directory: &Path) -> io::Result<(PathBuf, File)> {
     for attempt in 0..64_u32 {
         let id = NEXT_TEMP_FILE_ID.fetch_add(1, AtomicOrdering::Relaxed);
-        let filename = format!(
-            ".title-tmdb-file.{}.{}.{}.tmp",
-            std::process::id(),
-            id,
-            attempt
-        );
+        let filename = format!(".tmdbtag.{}.{}.{}.tmp", std::process::id(), id, attempt);
         let path = directory.join(filename);
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(file) => return Ok((path, file)),
@@ -2077,7 +2072,7 @@ mod tests {
                 .unwrap()
                 .file_name()
                 .to_string_lossy()
-                .starts_with(".title-tmdb-file.")
+                .starts_with(".tmdbtag.")
         })
     }
 }
