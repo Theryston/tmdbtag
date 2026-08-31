@@ -1,15 +1,21 @@
 # Task 04 — Naming Normalization and Metadata Recovery
 
-**Status:** Completed — pure filename normalization, multi-format filename generation, generated-name parsing, and metadata round-trip tests are implemented.
-**Priority:** P0
-**Dependencies:** Task 01; uses the metadata model from Task 02 when integrated
-**Blocks:** Task 05
+**Status:** Completed — pure filename normalization, multi-format filename
+generation, generated-name parsing, and metadata round-trip tests are
+implemented. **Priority:** P0 **Dependencies:** Task 01; uses the metadata model
+from Task 02 when integrated **Blocks:** Task 05
 
 ## Objective
 
-Implement the pure, deterministic naming layer that converts confirmed TMDB metadata into filesystem-safe filenames and later recovers the essential metadata from those filenames. This is the identity contract of the product: the generated name must remain useful even though there is no local database in the MVP.
+Implement the pure, deterministic naming layer that converts confirmed TMDB
+metadata into filesystem-safe filenames and later recovers the essential
+metadata from those filenames. This is the identity contract of the product: the
+generated name must remain useful even though there is no local database in the
+MVP.
 
-The raw title returned by TMDB is metadata. It must never be inserted directly into a filename. Every title passes through one mandatory normalization function before composition.
+The raw title returned by TMDB is metadata. It must never be inserted directly
+into a filename. Every title passes through one mandatory normalization function
+before composition.
 
 ## Required outcome
 
@@ -17,27 +23,30 @@ Generate exactly these filename shapes:
 
 ```text
 Movie:
-{tmdb_id}__TMDB__MOVIE__TMDB__{normalized_title}.{video_extension}
+{tmdb_id}__S__MOVIE__S__{normalized_title}.{video_extension}
 
 Series episode:
-{tmdb_id}__TMDB__SERIES__TMDB__S{season:02}__TMDB__E{episode:02}__TMDB__{normalized_series_title}.{video_extension}
+{tmdb_id}__S__SERIES__S__S{season:02}E{episode:02}__S__{normalized_series_title}.{video_extension}
 ```
 
 Examples:
 
 ```text
-550__TMDB__MOVIE__TMDB__Fight Club.mkv
-1399__TMDB__SERIES__TMDB__S01__TMDB__E01__TMDB__Game of Thrones.mp4
-519182__TMDB__MOVIE__TMDB__Spider-Man - No Way Home.mkv
+550__S__MOVIE__S__Fight Club.mkv
+1399__S__SERIES__S__S01E01__S__Game of Thrones.mp4
+519182__S__MOVIE__S__Spider-Man - No Way Home.mkv
 ```
 
-The normalization must be deterministic and idempotent. A generated filename must be parseable into
-the TMDB ID, explicit media type, and, for a series, separate season and episode fields without
-relying on a database or the original source filename.
+The normalization must be deterministic and idempotent. A generated filename
+must be parseable into the TMDB ID, explicit media type, and, for a series,
+the combined `S<season>E<episode>` field without relying on a database or the
+original source filename. The parser then splits that field at `E` to recover
+the season and episode values.
 
-`__TMDB__` is the reserved, filesystem-safe field delimiter. It is used only between metadata
-fields, and the normalized title must never contain this token or any case variation of it. This
-allows a future metadata reader to use `split("__TMDB__")` and validate the resulting fields.
+`__S__` is the reserved, filesystem-safe field delimiter. It is used only
+between metadata fields, and the normalized title must never contain this token
+or any case variation of it. This allows a future metadata reader to use
+`split("__S__")` and validate the resulting fields.
 
 ## Scope
 
@@ -51,9 +60,12 @@ Use validated values rather than arbitrary strings where practical:
 - raw localized title;
 - original title as an optional fallback;
 - the selected source video's recognized extension.
-- a conservative 255-byte filename-component limit, with truncation applied only to the title.
+- a conservative 255-byte filename-component limit, with truncation applied only
+  to the title.
 
-Keep the raw title separate from the normalized title. The raw value is needed for display, diagnostics, and future metadata operations. The normalized value is only for the destination filename.
+Keep the raw title separate from the normalized title. The raw value is needed
+for display, diagnostics, and future metadata operations. The normalized value
+is only for the destination filename.
 
 ### 2. Implement mandatory title normalization
 
@@ -67,18 +79,26 @@ The pipeline must:
 
 1. preserve the raw TMDB title outside the function;
 2. trim leading and trailing Unicode whitespace;
-3. replace filesystem-invalid characters and control characters with a readable safe separator;
-4. include at least `/`, `\\`, `:`, `*`, `?`, `"`, `<`, `>`, and `|` in the invalid-character policy;
-5. replace the reserved `__TMDB__` delimiter and its case variations with a readable safe separator;
-6. use a readable separator such as ` - `, so `Mission: Impossible` becomes `Mission - Impossible`;
+3. replace filesystem-invalid characters and control characters with a readable
+   safe separator;
+4. include at least `/`, `\\`, `:`, `*`, `?`, `"`, `<`, `>`, and `|` in the
+   invalid-character policy;
+5. replace the reserved `__S__` delimiter and its case variations with a
+   readable safe separator;
+6. use a readable separator such as `-`, so `Mission: Impossible` becomes
+   `Mission - Impossible`;
 7. collapse repeated whitespace and repeated replacement separators;
 8. remove trailing whitespace, periods, and replacement separators;
 9. preserve accents and safe Unicode characters;
-10. account for Windows-reserved filename components if Windows support is claimed;
+10. account for Windows-reserved filename components if Windows support is
+    claimed;
 11. shorten only the title component when path-length limits require it;
-12. return an error if normalization would produce an empty title rather than inventing metadata.
+12. return an error if normalization would produce an empty title rather than
+    inventing metadata.
 
-The function must be platform-safe even when executed on a platform where a character such as `:` happens to be accepted. Cross-platform output is the reason the invalid-character policy is explicit.
+The function must be platform-safe even when executed on a platform where a
+character such as `:` happens to be accepted. Cross-platform output is the
+reason the invalid-character policy is explicit.
 
 Required examples:
 
@@ -97,7 +117,8 @@ normalize_title_for_filename(
 ) == normalize_title_for_filename(title)
 ```
 
-Normalization may change only the title component. It must never change the TMDB ID, media type, season, episode, extension, or raw metadata held in memory.
+Normalization may change only the title component. It must never change the TMDB
+ID, media type, season, episode, extension, or raw metadata held in memory.
 
 ### 3. Compose movie and series names
 
@@ -105,26 +126,31 @@ Movie rules:
 
 - use the numeric TMDB ID without a `tmdb` prefix;
 - use the literal `MOVIE` or `SERIES` media-type field;
-- separate every metadata field with `__TMDB__`;
-- for a series, use separate `S<season>` and `E<episode>` fields;
-- use the normalized localized title, falling back to the original title only when the configured-language title is unavailable;
-- preserve the selected source video's extension and emit it in lowercase in generated names;
+- separate every metadata field with `__S__`;
+- for a series, use one combined `S<season>E<episode>` field;
+- use the normalized localized title, falling back to the original title only
+  when the configured-language title is unavailable;
+- preserve the selected source video's extension and emit it in lowercase in
+  generated names;
 - omit year, codec, resolution, language, release group, and original filename.
 
 Series rules:
 
 - use the numeric series ID;
-- use separate `Sxx` and `Exx` fields with at least two digits for season and episode;
+- use one combined `SxxExx` field with at least two digits for season and
+  episode;
 - do not truncate values above 99;
 - use the series title, not the episode title;
 - omit arbitrary source filename data;
 - preserve the selected source video's extension and emit it in lowercase.
 
-Do not add random, timestamped, or `(1)`-style collision suffixes. Collisions are a plan-validation error owned by Task 05.
+Do not add random, timestamped, or `(1)`-style collision suffixes. Collisions
+are a plan-validation error owned by Task 05.
 
 ### 4. Parse generated filenames
 
-Implement a parser for the documented generated forms. The parser should return a typed reference equivalent to:
+Implement a parser for the documented generated forms. The parser should return
+a typed reference equivalent to:
 
 ```text
 ParsedMediaReference {
@@ -139,18 +165,22 @@ ParsedMediaReference {
 
 Parsing rules:
 
-- split the filename stem on the exact `__TMDB__` delimiter;
-- recognize the exact movie and series field counts and the documented video-extension policy;
+- split the filename stem on the exact `__S__` delimiter;
+- recognize the exact movie and series field counts and the documented
+  video-extension policy;
 - read the media type from the fixed `MOVIE` or `SERIES` field;
-- read season and episode from separate `Sxx` and `Exx` fields for series names;
+- read season and episode from the combined `SxxExx` field for series names by
+  splitting it at the `E` marker;
 - reject malformed, missing, zero, negative, overflowed, or ambiguous IDs;
-- reject a series name with only one of the season/episode fields;
+- reject a series name with an incomplete or malformed `SxxExx` field;
 - reject any generated-looking name whose title contains the reserved delimiter;
 - preserve the title hint as a display hint, not as authoritative metadata;
 - recover and preserve the video extension as part of the parsed reference;
 - never interpret arbitrary source filenames as confirmed TMDB references.
 
-The parser must not perform a network request. A future metadata command can use the parsed ID and type to query TMDB again, then treat the returned title as authoritative.
+The parser must not perform a network request. A future metadata command can use
+the parsed ID and type to query TMDB again, then treat the returned title as
+authoritative.
 
 ### 5. Keep naming path-safe
 
@@ -158,9 +188,10 @@ The parser must not perform a network request. A future metadata command can use
 - Never allow normalized title content to introduce a path separator.
 - Do not permit `.` or `..` as a title component.
 - Keep extension handling explicit and case-stable.
-- Keep the shared recognized-video-extension policy in one domain type and reuse it for generation,
-  parsing, and filesystem discovery.
-- Expose length or path-limit errors to the plan validator rather than silently dropping identity fields.
+- Keep the shared recognized-video-extension policy in one domain type and reuse
+  it for generation, parsing, and filesystem discovery.
+- Expose length or path-limit errors to the plan validator rather than silently
+  dropping identity fields.
 
 ## Explicit non-goals
 
@@ -179,7 +210,8 @@ Do not implement in this task:
 
 ## Tests and verification
 
-Because this layer is pure, prefer exhaustive unit tests and property-style tests where practical. Cover at least:
+Because this layer is pure, prefer exhaustive unit tests and property-style
+tests where practical. Cover at least:
 
 - movie composition;
 - series composition;
@@ -199,24 +231,32 @@ Because this layer is pure, prefer exhaustive unit tests and property-style test
 - title normalization idempotence;
 - generated-name round trips through the parser;
 - malformed movie and series names;
-- parser rejection of malformed field counts, reserved-delimiter collisions, and unsafe names;
-- filename-component length enforcement that truncates only the title and preserves identity fields;
+- parser rejection of malformed field counts, reserved-delimiter collisions, and
+  unsafe names;
+- filename-component length enforcement that truncates only the title and
+  preserves identity fields;
 - guarantee that parsing does not access the network or filesystem.
 
 ## Acceptance checklist
 
-- [x] All final filenames pass through one deterministic title-normalization function.
+- [x] All final filenames pass through one deterministic title-normalization
+      function.
 - [x] A colon is always normalized even on platforms that permit it.
 - [x] Invalid characters cannot create path separators or unsafe components.
 - [x] Accents and safe Unicode are preserved.
 - [x] The raw TMDB title remains available separately from the normalized title.
 - [x] Movie names match the documented pattern exactly.
 - [x] Series names match the documented pattern exactly.
-- [x] Every metadata field is separated by the reserved `__TMDB__` delimiter.
-- [x] The normalized title cannot contain the reserved delimiter, including case variations.
-- [x] Season and episode values are padded to at least two digits without truncation.
-- [x] The generated extension preserves the selected source extension in lowercase.
+- [x] Every metadata field is separated by the reserved `__S__` delimiter.
+- [x] The normalized title cannot contain the reserved delimiter, including case
+      variations.
+- [x] Season and episode values are padded to at least two digits without
+      truncation.
+- [x] The generated extension preserves the selected source extension in
+      lowercase.
 - [x] The title never contributes unverified source filename data.
-- [x] Generated names can be parsed back into ID, type, episode, and extension values.
-- [x] Parsing treats the title as a hint and the ID/type as the recoverable identity.
+- [x] Generated names can be parsed back into ID, type, episode, and extension
+      values.
+- [x] Parsing treats the title as a hint and the ID/type as the recoverable
+      identity.
 - [x] Unit and round-trip tests cover normal, invalid, Unicode, and edge cases.

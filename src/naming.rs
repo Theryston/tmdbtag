@@ -15,7 +15,7 @@ pub const MAX_FILENAME_BYTES: usize = 255;
 ///
 /// The title normalizer removes this token from title content so a future metadata reader can
 /// safely recover the fixed fields with `split(FILENAME_SEPARATOR)`.
-pub const FILENAME_SEPARATOR: &str = "__TMDB__";
+pub const FILENAME_SEPARATOR: &str = "__S__";
 
 const REPLACEMENT_SEPARATOR: &str = " - ";
 
@@ -131,13 +131,12 @@ pub fn generate_series_filename(
     let title = normalized_item_title(item)?;
     let extension = parse_video_extension(source_extension)?;
     let prefix = format!(
-        "{}{}{}{}S{:02}{}E{:02}{}",
+        "{}{}{}{}S{:02}E{:02}{}",
         item.id,
         FILENAME_SEPARATOR,
         MediaType::Series,
         FILENAME_SEPARATOR,
         episode.season(),
-        FILENAME_SEPARATOR,
         episode.episode(),
         FILENAME_SEPARATOR
     );
@@ -191,15 +190,14 @@ pub fn parse_generated_filename(filename: &str) -> Result<ParsedMediaReference, 
                 video_extension,
             })
         }
-        [raw_id, raw_type, raw_season, raw_episode, raw_title] => {
+        [raw_id, raw_type, raw_episode_reference, raw_title] => {
             let tmdb_id = parse_filename_id(raw_id)?;
             if *raw_type != MediaType::Series.label() {
                 return Err(invalid_filename(
                     "its series filename has an invalid media type",
                 ));
             }
-            let season = parse_series_component(raw_season, 'S', "season")?;
-            let episode = parse_series_component(raw_episode, 'E', "episode")?;
+            let (season, episode) = parse_series_episode(raw_episode_reference)?;
             let title_hint = validate_parsed_title(raw_title)?;
             Ok(ParsedMediaReference {
                 tmdb_id,
@@ -316,18 +314,16 @@ fn parse_filename_id(raw_id: &str) -> Result<TmdbId, NamingError> {
     Ok(tmdb_id)
 }
 
-fn parse_series_component(
-    component: &str,
-    prefix: char,
-    field: &'static str,
-) -> Result<u32, NamingError> {
-    let value = component.strip_prefix(prefix).ok_or_else(|| {
-        invalid_filename(match field {
-            "season" => "its season field must start with uppercase S",
-            _ => "its episode field must start with uppercase E",
-        })
-    })?;
-    parse_padded_number(value, field)
+fn parse_series_episode(component: &str) -> Result<(u32, u32), NamingError> {
+    let value = component
+        .strip_prefix('S')
+        .ok_or_else(|| invalid_filename("its series episode field must start with uppercase S"))?;
+    let (raw_season, raw_episode) = value
+        .split_once('E')
+        .ok_or_else(|| invalid_filename("its series episode field must contain uppercase E"))?;
+    let season = parse_padded_number(raw_season, "season")?;
+    let episode = parse_padded_number(raw_episode, "episode")?;
+    Ok((season, episode))
 }
 
 fn parse_padded_number(value: &str, field: &'static str) -> Result<u32, NamingError> {
@@ -496,18 +492,18 @@ mod tests {
 
     #[test]
     fn title_normalization_removes_the_reserved_filename_separator() {
-        for title in ["A__TMDB__B", "A__tmdb__B"] {
+        for title in ["A__S__B", "A__s__B"] {
             let normalized = normalize_title_for_filename(title).unwrap();
 
             assert!(!normalized.to_ascii_uppercase().contains(FILENAME_SEPARATOR));
         }
 
         assert_eq!(
-            normalize_title_for_filename("__TMDB__"),
+            normalize_title_for_filename("__S__"),
             Err(NamingError::EmptyTitle)
         );
 
-        assert_eq!(normalize_title_for_filename("A__TMDB__B").unwrap(), "A - B");
+        assert_eq!(normalize_title_for_filename("A__S__B").unwrap(), "A - B");
     }
 
     #[test]
@@ -537,7 +533,7 @@ mod tests {
 
         assert_eq!(
             generate_movie_filename(&item, "MP4").unwrap(),
-            "550__TMDB__MOVIE__TMDB__Fight Club.mp4"
+            "550__S__MOVIE__S__Fight Club.mp4"
         );
     }
 
@@ -547,7 +543,7 @@ mod tests {
 
         assert_eq!(
             generate_movie_filename(&item, ".MKV").unwrap(),
-            "550__TMDB__MOVIE__TMDB__Original Title.mkv"
+            "550__S__MOVIE__S__Original Title.mkv"
         );
     }
 
@@ -557,11 +553,11 @@ mod tests {
 
         assert_eq!(
             generate_series_filename(&item, EpisodeRef::new(1, 2), "mKv").unwrap(),
-            "1399__TMDB__SERIES__TMDB__S01__TMDB__E02__TMDB__Game of Thrones.mkv"
+            "1399__S__SERIES__S__S01E02__S__Game of Thrones.mkv"
         );
         assert_eq!(
             generate_series_filename(&item, EpisodeRef::new(100, 123), "MP4").unwrap(),
-            "1399__TMDB__SERIES__TMDB__S100__TMDB__E123__TMDB__Game of Thrones.mp4"
+            "1399__S__SERIES__S__S100E123__S__Game of Thrones.mp4"
         );
     }
 
@@ -595,7 +591,7 @@ mod tests {
         let item = movie("S01E01 - A Movie", None);
         let generated = generate_movie_filename(&item, "mp4").unwrap();
 
-        assert_eq!(generated, "550__TMDB__MOVIE__TMDB__S01E01 - A Movie.mp4");
+        assert_eq!(generated, "550__S__MOVIE__S__S01E01 - A Movie.mp4");
         assert_eq!(
             parse_generated_filename(&generated).unwrap().media_type,
             MediaType::Movie
@@ -609,7 +605,7 @@ mod tests {
         let filename = generate_movie_filename(&item, "mp4").unwrap();
 
         assert!(filename.len() <= MAX_FILENAME_BYTES);
-        assert!(filename.starts_with("550__TMDB__MOVIE__TMDB__"));
+        assert!(filename.starts_with("550__S__MOVIE__S__"));
         assert!(filename.ends_with(".mp4"));
         let parsed = parse_generated_filename(&filename).unwrap();
         assert_eq!(parsed.tmdb_id.value(), 550);
@@ -640,6 +636,12 @@ mod tests {
     fn generated_series_filename_round_trips_through_parser() {
         let item = series("Game of Thrones");
         let generated = generate_series_filename(&item, EpisodeRef::new(0, 7), "DVR-MS").unwrap();
+        let fields = generated
+            .strip_suffix(".dvr-ms")
+            .unwrap()
+            .split(FILENAME_SEPARATOR)
+            .collect::<Vec<_>>();
+        assert_eq!(fields, ["1399", "SERIES", "S00E07", "Game of Thrones"]);
         let parsed = parse_generated_filename(&generated).unwrap();
 
         assert_eq!(parsed.tmdb_id.value(), 1399);
@@ -660,21 +662,25 @@ mod tests {
             "550 - .mp4",
             "000550 - Title.mp4",
             "18446744073709551616 - Title.mp4",
-            "550__TMDB__MOVIE__TMDB__.mp4",
-            "000550__TMDB__MOVIE__TMDB__Title.mp4",
-            "18446744073709551616__TMDB__MOVIE__TMDB__Title.mp4",
-            "550__TMDB__MOVIE__TMDB__Mission: Impossible.mp4",
-            "550__TMDB__MOVIE__TMDB__Title/Director.mp4",
-            "550__TMDB__MOVIE__TMDB__Title__TMDB__Director.mp4",
-            "550__TMDB__MOVIE__TMDB__Title__tmdb__Director.mp4",
-            "550__TMDB__SERIES__TMDB__S01E02__TMDB__Series.mp4",
-            "550__TMDB__SERIES__TMDB__S01__TMDB__E02.mp4",
-            "550__TMDB__SERIES__TMDB__S01__TMDB__E02__TMDB__.mp4",
-            "550__TMDB__SERIES__TMDB__s01__TMDB__E02__TMDB__Series.mp4",
-            "550__TMDB__SERIES__TMDB__S1__TMDB__E02__TMDB__Series.mp4",
-            "550__TMDB__SERIES__TMDB__S01__TMDB__E1__TMDB__Series.mp4",
-            "550__TMDB__SERIES__TMDB__S01__TMDB__E02__TMDB__Series__TMDB__Extra.mp4",
-            "550__TMDB__SERIES__TMDB__S01__TMDB__E02__TMDB__Series.mp4/other",
+            "550__S__MOVIE__S__.mp4",
+            "000550__S__MOVIE__S__Title.mp4",
+            "18446744073709551616__S__MOVIE__S__Title.mp4",
+            "550__S__MOVIE__S__Mission: Impossible.mp4",
+            "550__S__MOVIE__S__Title/Director.mp4",
+            "550__S__MOVIE__S__Title__S__Director.mp4",
+            "550__S__MOVIE__S__Title__s__Director.mp4",
+            "550__S__SERIES__S__S01__S__E02__S__Series.mp4",
+            "550__S__SERIES__S__S01E02.mp4",
+            "550__S__SERIES__S__S01__S__E02.mp4",
+            "550__S__SERIES__S__S01__S__E02__S__.mp4",
+            "550__S__SERIES__S__s01__S__E02__S__Series.mp4",
+            "550__S__SERIES__S__S1__S__E02__S__Series.mp4",
+            "550__S__SERIES__S__S01__S__E1__S__Series.mp4",
+            "550__S__SERIES__S__S01E2__S__Series.mp4",
+            "550__S__SERIES__S__S1E02__S__Series.mp4",
+            "550__S__SERIES__S__S01E02E03__S__Series.mp4",
+            "550__S__SERIES__S__S01E02__S__Series__S__Extra.mp4",
+            "550__S__SERIES__S__S01E02__S__Series.mp4/other",
         ] {
             assert!(
                 parse_generated_filename(filename).is_err(),
@@ -685,7 +691,7 @@ mod tests {
 
     #[test]
     fn parser_accepts_case_insensitive_recognized_extensions_and_preserves_title_dots() {
-        let parsed = parse_generated_filename("550__TMDB__MOVIE__TMDB__WALL.E.MKV").unwrap();
+        let parsed = parse_generated_filename("550__S__MOVIE__S__WALL.E.MKV").unwrap();
 
         assert_eq!(parsed.title_hint, "WALL.E");
         assert_eq!(parsed.extension(), "mkv");
