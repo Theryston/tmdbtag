@@ -68,6 +68,7 @@ tmdbtag/
     ├── error.rs
     ├── ui.rs
     ├── filesystem.rs
+    ├── storage.rs
     └── tmdb/
         ├── mod.rs
         ├── client.rs
@@ -75,11 +76,12 @@ tmdbtag/
 ```
 
 The complete documented interactive MVP workflow is implemented: command
-parsing, interactive terminal contracts, per-user configuration persistence,
-TMDB identification, non-mutating filesystem discovery and media selection,
-deterministic naming, typed plan construction, complete preview, pre-commit
-validation, safe copy/move execution with byte-based progress, and per-file
-execution reporting are available.
+parsing, interactive terminal contracts, per-user TMDB and S3 configuration
+persistence, storage selection, local/S3 discovery and media selection, TMDB
+identification, deterministic naming, typed plan construction, complete
+preview, pre-commit validation, safe local and cross-storage copy/move
+execution with byte-based progress, and per-file execution reporting are
+available.
 Future retrieval commands, non-interactive modes, and auxiliary-file support
 remain intentionally out of scope.
 
@@ -155,44 +157,85 @@ Rules:
   before this wizard and must not require a key, network access, or a readable
   media directory.
 
+### Storage configuration
+
+The normal organization workflow must select the source storage and destination
+storage immediately after TMDB configuration succeeds. Each selection is one
+of `StorageKind::Local` or `StorageKind::S3`; the CLI must not infer a backend
+from the destination text.
+
+When either selected backend is S3, load the complete S3 profile from the same
+per-user JSON file before discovery. The saved profile fields are:
+`access_key`, `secret_key`, `bucket`, `base_path`, `endpoint`, and `region`.
+`base_path` is optional and represents a normalized object-key prefix.
+`endpoint` is optional; an empty or omitted endpoint resolves to
+`https://s3.amazonaws.com`, the standard AWS S3 endpoint. A custom endpoint is
+available for S3-compatible services. The normal workflow asks for the
+complete profile only when it is missing or invalid. A valid profile must be
+reused silently, just like a valid saved TMDB field. The explicit `config`
+command may deliberately replace every S3 field through the same prompt,
+validation, and persistence service.
+
+The S3 secret key must use masked input. S3 credentials must never appear in
+Debug output, errors, previews, plan data, progress messages, tests, or
+release artifacts. S3 endpoint and bucket descriptions may appear in a
+preview, but must not contain credentials or authorization headers.
+
+The source and destination choices are independent. The supported matrix is
+local-to-local, local-to-S3, S3-to-local, and S3-to-S3. S3 discovery lists
+objects recursively under the configured base prefix and uses the same
+case-insensitive video-extension policy as local discovery. Object keys shown
+to users are relative labels; the exact key remains an owned `String` inside
+the storage layer.
+
 ### Source and destination
 
-- The application uses the process current working directory as the source root.
-- The executable's directory is not automatically the source root.
-- Before filesystem discovery, the application must load a complete TMDB
-  configuration and collect only missing or invalid fields.
-- The destination folder is requested after startup configuration and before the
-  media tree is scanned.
-- Destination paths may be absolute or relative to the current working
-  directory.
-- A destination that does not exist may be created only after explicit user
-  confirmation.
-- The current directory itself cannot be the destination.
-- A destination cannot overlap a selected nested source container.
-- If the destination is inside the current directory, its complete subtree must
-  be excluded from media discovery before the unified explorer is built.
-- A destination child is allowed when the selected source file is directly in
-  the current source root; the root-level file is grouped under the root only
+- The organization wizard selects independent source and destination storage
+  backends after TMDB configuration and before discovery.
+- When the source backend is local, the process current working directory is
+  the source root; the executable's directory is never inferred as the root.
+- When the source backend is S3, the configured bucket and base path are the
+  source root. A missing object prefix is not an error; an inaccessible bucket
+  or invalid response is.
+- A local destination may be absolute or relative to the current working
+  directory and is created only after explicit confirmation and final plan
+  approval.
+- An S3 destination is a normalized prefix relative to the configured S3 base
+  path. Object storage has implicit prefixes, so no directory object is
+  created.
+- A local destination cannot be the current directory or overlap a selected
+  nested source container. A destination inside the local source tree is
+  excluded from discovery before the explorer is built.
+- When source and destination use the same S3 profile, the destination prefix
+  is excluded from source listing. S3 source and destination paths are keys,
+  never `PathBuf` values.
+- A destination child is allowed when a selected local source file is directly
+  in the current source root; root-level files are grouped under the root only
   for internal plan validation.
 
 ### Folder and file discovery
 
-- The application performs one recursive video discovery from the current
-  working directory.
-- Video files directly in the current directory and in all real subdirectories
-  are eligible.
+- The selected backend performs one recursive video discovery pass. Local
+  discovery starts at the process current working directory; S3 discovery
+  lists objects below the configured bucket prefix with pagination.
+- Local videos directly in the current directory and in all real
+  subdirectories are eligible. S3 objects can use slash-separated keys at any
+  depth under the configured base path.
 - The interactive UI exposes one unified expandable explorer; there is no
   source-folder selection followed by one file selector per folder.
 - Folder rows exist only when they contain at least one eligible video
-  descendant.
-- The MVP recognizes common video extensions through the centralized
+  descendant. S3 folder rows are virtual UI containers derived from object
+  keys.
+- The MVP recognizes common video extensions through the centralized,
   case-insensitive `VIDEO_EXTENSIONS` allowlist; it is not limited to `.mkv`.
-- Nested directories are containers in the explorer, never selectable media
-  items.
-- Symbolic links must not be followed in the MVP.
-- Discovery and display order must be deterministic by relative path.
-- Filesystem paths shown by the interactive UI must be relative to the current
-  source root. Exact paths remain owned `PathBuf` values inside the application.
+- Nested directories and S3 prefixes are containers in the explorer, never
+  selectable media items.
+- Local symbolic links must not be followed in the MVP. S3 object keys are
+  treated as data and must pass safe relative-key validation.
+- Discovery and display order must be deterministic by relative path/key.
+- Local paths shown by the interactive UI are relative to the current source
+  root. S3 keys are relative to the configured source prefix. Exact local
+  `PathBuf` values and exact S3 `String` keys remain owned by the storage layer.
 - All folders start collapsed. `Tab` expands or collapses the highlighted
   folder, `Space` selects or deselects a video, and `Enter` confirms the
   complete selected-file array.
@@ -595,19 +638,22 @@ keyboard navigation, multiple selection, search, styling, terminal fallback,
 maintenance, and platform support. Do not invent a package name or put an
 unverified crate into Cargo.toml.
 
-The current implementation uses `clap` for command parsing, `dialoguer` for standard
-interactive prompts and keyboard selection, `crossterm` for polled raw keyboard
-events in the live TMDB selector, `indicatif` for spinner/progress feedback, and
-`thiserror` for typed errors. The configuration and TMDB follow-up adds `serde`
-and `serde_json` for the documented per-user JSON file and API mappings,
-`reqwest` with Rustls for bounded HTTPS requests, and `tempfile` as a test-only
-dependency for isolated configuration tests. These dependencies must remain
-behind the appropriate boundaries. The dialoguer adapter still provides the
-generic searchable selection behavior required by other lists, while the TMDB
-selector owns its live query and remote-result interaction in a focused
-crossterm-backed control. Callers must not depend on dialoguer or crossterm
-types directly. TMDB client tests use a local standard-library loopback server,
-so they do not require live credentials or network data.
+The current implementation uses `clap` for command parsing, `dialoguer` for
+standard interactive prompts and keyboard selection, `crossterm` for polled raw
+keyboard events in the live TMDB selector and media explorer, `indicatif` for
+spinner/progress feedback, and `thiserror` for typed errors. The configuration
+and TMDB boundary uses `serde` and `serde_json` for the documented per-user
+JSON file and API mappings, `reqwest` with Rustls for bounded HTTPS requests,
+and `tempfile` as a test-only dependency for isolated configuration tests. The
+storage boundary uses the official `aws-sdk-s3` crate with an explicitly
+configured Rust/Tokio runtime and `urlencoding` for safe S3 copy-source keys.
+These dependencies must remain behind the appropriate boundaries. The
+dialoguer adapter still provides the generic searchable selection behavior
+required by other lists, while the TMDB selector owns its live query and
+remote-result interaction in a focused crossterm-backed control. Callers must
+not depend on dialoguer, crossterm, or AWS SDK types directly. TMDB client tests
+use a local standard-library loopback server, and storage tests use local
+fixtures, so they do not require live credentials or network data.
 
 For a binary application, Cargo.lock should be generated and versioned once
 dependencies are introduced, unless the repository's explicit policy changes.
@@ -628,6 +674,7 @@ src/
 ├── ui.rs
 ├── filesystem.rs
 ├── naming.rs
+├── storage.rs
 └── tmdb/
     ├── mod.rs
     ├── client.rs
@@ -660,26 +707,26 @@ It should coordinate:
 
 1. loading the per-user TMDB configuration and collecting only missing fields;
 2. TMDB configuration validation;
-3. current-directory discovery;
-4. operation selection (`Copy` or `Move`);
-5. destination selection;
-6. one recursive video discovery from the current directory with
-   destination-subtree exclusion;
-7. one unified expandable video-file selection;
-8. TMDB identification;
-9. series episode input;
-10. plan construction;
-11. full validation;
-12. preview and confirmation;
-13. copy or move execution and final reporting.
+3. source and destination storage selection;
+4. loading the shared S3 profile when either selected backend requires it;
+5. operation selection (`Copy` or `Move`);
+6. backend-specific destination selection;
+7. one recursive video discovery with destination-prefix exclusion;
+8. one unified expandable video-file selection;
+9. TMDB identification;
+10. series episode input;
+11. plan construction;
+12. full validation;
+13. preview and confirmation;
+14. local, S3, or cross-storage copy/move execution and final reporting.
 
 It should depend on abstractions or focused modules, not on terminal-specific
 implementation details.
 
 The application layer may decide which step happens next, but it must not
-contain low-level path manipulation, raw HTTP parsing, or prompt rendering
+contain low-level path/key manipulation, raw HTTP parsing, or prompt rendering
 details. The normal organization workflow and the `config` command must call the
-shared configuration service rather than duplicate prompt or save logic.
+shared TMDB/S3 configuration service rather than duplicate prompt or save logic.
 
 ### cli.rs
 
@@ -692,6 +739,9 @@ It should:
 - render the interactive wizard through a dedicated terminal UI adapter;
 - collect text, masked secrets, language choices, single-choice,
   multiple-choice, confirmation, and numeric input;
+- collect the source and destination storage backend choices;
+- collect the S3 profile through the shared configuration service without
+  exposing credentials;
 - collect the explicit copy-or-move operation choice;
 - render the debounced live TMDB query/result selector while receiving search
   behavior through an application-supplied callback;
@@ -715,6 +765,7 @@ The CLI layer must not:
 - parse TMDB response JSON;
 - call std::fs::rename directly;
 - call copy, hard-link, delete, or other filesystem mutation APIs directly;
+- call S3 request builders or perform object transfers directly;
 - decide whether a destination conflict is safe;
 - silently choose a search result;
 - log credentials.
@@ -748,24 +799,31 @@ It should handle:
 - TMDB_API_KEY fallback loading;
 - the shared interactive API-key and language configuration flow;
 - TMDB language;
+- the optional S3 profile: access key, secret key, bucket, normalized base
+  path, optional custom endpoint (defaulting to `https://s3.amazonaws.com`),
+  and region;
+- the shared interactive S3 configuration flow used by normal startup and the
+  explicit `config` command;
 - timeout and other explicitly supported settings.
 
-Current-directory resolution and destination-path normalization belong to
-`filesystem.rs`, not to the configuration store. This keeps persisted user
-preferences separate from paths that are selected for one execution.
+Current-directory resolution and local destination-path normalization belong to
+the local storage adapter, not to the configuration store. S3 object-prefix
+normalization belongs to the S3 storage adapter. This keeps persisted user
+preferences separate from paths or prefixes selected for one execution.
 
 Configuration parsing should be separate from business validation. For example,
 reading the saved JSON file and a masked default from TMDB_API_KEY is
 configuration parsing; deciding whether a series episode exists is domain/API
 validation. The normal workflow asks only for missing or invalid saved fields.
-The `config` command requests both fields through the same reusable function. A
-complete saved configuration must not be rewritten merely because the normal
-workflow started.
+The `config` command requests both TMDB fields and deliberately offers the S3
+profile through the same reusable functions. A complete saved configuration
+must not be rewritten merely because the normal workflow started.
 
 Use a storage model with optional fields rather than deserializing directly into
 `StartupConfig`. This makes a missing API key or language visible and prevents
 an incomplete file from being treated as verified configuration. The saved JSON
-field names are `tmdb_api_key` and `tmdb_language`.
+field names are `tmdb_api_key`, `tmdb_language`, and the nested S3 fields
+`access_key`, `secret_key`, `bucket`, `base_path`, `endpoint`, and `region`.
 
 The API key is intentionally persisted in the user configuration file because
 that is the product requirement. On Unix-like systems, create a newly needed
@@ -801,6 +859,17 @@ TransferProgress
 OperationStatus
 OperationResult
 ExecutionReport
+StorageKind
+StorageRole
+StoragePath
+StorageDestination
+StorageVideoFile
+StorageSelection
+StorageSnapshot
+StoragePlannedOperation
+StoragePlan
+StorageTransferProgress
+StorageExecutionReport
 ```
 
 Exact names may vary, but the concepts should remain explicit.
@@ -812,6 +881,11 @@ The domain layer must not depend on:
 - reqwest or a specific HTTP client;
 - environment-variable access;
 - direct filesystem mutation.
+
+Storage concepts must remain backend-neutral. `StoragePath` may contain an
+exact local `PathBuf` or a normalized S3 object-key `String`; never force both
+representations into one string field. The domain and storage plan must not
+depend on clap, dialoguer, crossterm, reqwest, or the AWS SDK.
 
 It may contain pure validation and transformation logic when that logic is
 independent of external I/O.
@@ -842,6 +916,11 @@ At minimum, distinguish:
 - permission failure;
 - same-volume move failure;
 - cross-volume copy verification failure;
+- invalid S3 profile and unsafe object-key path;
+- S3 request, authentication, rate-limit, invalid-response, and destination
+  conflict failures;
+- S3 source-change and conditional-copy/delete failures;
+- cross-storage temporary download, upload, and publication failures;
 - cancellation;
 - partial execution.
 
@@ -900,6 +979,49 @@ may prompt for the destination and selections, but it must retain the exact
 
 Use Rust filesystem APIs directly. Shelling out creates quoting, platform,
 error-reporting, and security problems.
+
+### storage.rs
+
+storage.rs is the backend-neutral storage boundary. It owns the `StorageBackend`
+contract, exact storage paths, discovery values, immutable storage plans,
+backend snapshots, cross-storage transfer orchestration, byte progress, and
+execution reports. It is the only application module allowed to coordinate
+local and S3 storage mutations.
+
+The contract must keep these concerns explicit:
+
+- `LocalStorage` delegates local discovery and local path validation to the
+  existing filesystem rules while retaining exact `PathBuf` values;
+- `S3Storage` uses the configured bucket, endpoint, region, credentials, and
+  base prefix while retaining exact object keys as `String` values;
+- local-to-local operations use destination-side temporary files and
+  no-replace publication;
+- local-to-S3 operations use a no-replace upload and verify the resulting
+  object before a move removes the source;
+- S3-to-local operations download into a local destination-side temporary file,
+  verify it, publish it without replacement, and only then remove the object
+  for a move;
+- S3-to-S3 operations use conditional server-side `CopyObject` followed by
+  conditional `DeleteObject` for a move; the CLI must not download the object
+  for this path;
+- S3 discovery must handle `ListObjectsV2` pagination, filter the shared video
+  extension allowlist, sort relative keys deterministically, and exclude the
+  selected destination prefix when source and destination use the same profile;
+- S3 uploads larger than the direct-upload threshold must use bounded
+  multipart parts and abort incomplete multipart uploads when a part or
+  completion request fails;
+- all S3 destination publication paths must use no-replace preconditions and
+  must not rely only on a prior `HeadObject` check;
+- all move implementations must revalidate the source snapshot immediately
+  before deletion and must preserve the source when verification or publication
+  fails.
+
+The storage module must not import clap, dialoguer, crossterm, or terminal
+rendering types. It may use the AWS SDK and Tokio internally, but no AWS SDK
+request builder or credential type may escape into app.rs, ui.rs, or domain.rs.
+Tests should inject or isolate backend behavior where possible; tests that
+exercise the real S3 adapter must use a local S3-compatible test server or a
+focused request fixture and must never require production credentials.
 
 ### naming.rs
 
@@ -1199,20 +1321,25 @@ For a normal interactive invocation, the exact high-level order is:
 5. the application validates the key and language;
 6. the application saves a complete configuration when missing fields were
    collected;
-7. the application obtains and validates the current working directory;
-8. the UI asks whether to copy or move;
-9. the UI asks for the destination;
-10. the filesystem layer recursively discovers recognized videos from the current
-   directory and excludes the destination subtree;
-11. the UI presents one collapsed-by-default expandable explorer and collects
+7. the UI asks for the source storage backend (`Local` or `S3`);
+8. the UI asks for the destination storage backend (`Local` or `S3`);
+9. when either backend is S3, the application loads or collects the complete
+   saved S3 profile and persists any newly collected values;
+10. the application resolves the selected source root and the UI asks whether
+   to copy or move;
+11. the UI asks for the backend-specific destination (local directory or S3
+   prefix);
+12. the selected storage adapter recursively discovers recognized videos and
+   excludes the destination subtree or prefix;
+13. the UI presents one collapsed-by-default expandable explorer and collects
    selected video files;
-12. the UI runs the identification loop for every selected video file;
-13. the UI collects season and episode for each file identified as a series;
-14. the application builds and validates the complete plan;
-15. the UI displays the complete preview, including total source bytes;
-16. the UI asks for explicit confirmation;
-17. the executor performs the approved copy or move and the UI shows byte
-    progress and the final report.
+14. the UI runs the identification loop for every selected video file;
+15. the UI collects season and episode for each file identified as a series;
+16. the application builds and validates the complete plan;
+17. the UI displays the complete preview, including total source bytes;
+18. the UI asks for explicit confirmation;
+19. the executor performs the approved local, S3, or cross-storage copy or
+   move and the UI shows byte progress and the final report.
 
 When both configuration fields are missing, the API-key and language questions
 happen in that order before destination or media discovery. If the configuration
@@ -1238,6 +1365,11 @@ trait InteractiveUi {
         default_language: &str,
     ) -> Result<String, UiError>;
     fn choose_file_operation(&mut self) -> Result<FileOperation, UiError>;
+    fn choose_storage(&mut self, role: StorageRole) -> Result<StorageKind, UiError>;
+    fn ask_storage_destination_path(
+        &mut self,
+        kind: StorageKind,
+    ) -> Result<String, UiError>;
     fn ask_destination(&mut self, initial: &Path) -> Result<PathBuf, UiError>;
     fn select_video_files(
         &mut self,
@@ -1255,13 +1387,17 @@ The exact trait shape is not prescribed. The separation is required:
 - interactive controls belong to the UI adapter;
 - workflow decisions belong to app.rs;
 - domain rules belong to domain modules;
-- filesystem mutation belongs to filesystem.rs.
+- storage mutation belongs behind `StorageBackend` in storage.rs; local
+  filesystem primitives remain behind `LocalStorage` and S3 requests remain
+  behind `S3Storage`.
 
-Filesystem paths shown by the interactive UI must be relative display values.
-Show every explorer row relative to the current source root and show preview
-source/destination values relative to that same root. Relative labels are
-presentation-only; never reconstruct an execution path from them, and never
-discard the exact `PathBuf` retained by discovery and planning.
+Storage locations shown by the interactive UI must be relative display values.
+Show local explorer rows relative to the current source root, S3 explorer rows
+relative to the configured base prefix, and preview source/destination values
+relative to their corresponding storage roots. Relative labels are
+presentation-only; never reconstruct an execution path or object key from
+them, and never discard the exact `PathBuf` or S3 key retained by discovery and
+planning.
 
 The video selector is one unified explorer, not a sequence of folder and
 per-folder file prompts. It must show root-level videos and folders that contain
@@ -1290,6 +1426,8 @@ Provide, where supported by the selected terminal UI library:
 
 - a branded header with the application name and version;
 - a visible step indicator;
+- a clear source-storage and destination-storage selection;
+- an S3 setup flow that explains the base prefix without printing secrets;
 - consistent English labels and terminology;
 - keyboard navigation;
 - obvious selected/unselected states;
@@ -1362,9 +1500,9 @@ During execution:
 - Show the current destination while building the plan.
 - Show the media type clearly.
 - Show the full source-to-destination mapping in the preview.
-- Render filesystem paths as relative display paths: every explorer row and
-  preview entry is relative to the current source root. Keep exact paths in the
-  plan for execution.
+- Render local paths and S3 object keys as relative display paths: every
+  explorer row and preview entry is relative to its selected storage root. Keep
+  exact paths and keys in the plan for execution.
 - Do not communicate safety-critical information by color alone.
 - Keep paths readable; truncate long explorer labels safely while preserving the
   filename suffix, and allow scrolling through the visible tree when necessary.
@@ -1394,12 +1532,14 @@ For every discovered entry:
 - preserve the actual path for later revalidation;
 - sort before returning results.
 
-The primary media discovery is one recursive walk rooted at the current
+The local storage discovery is one recursive walk rooted at the current
 directory. It includes root-level videos, creates no UI-specific tree state, and
 excludes the configured destination subtree. The terminal layer may build a
-presentation tree from the returned flat paths, but the filesystem layer remains
-responsible for the authoritative discovery, sorting, and safety checks. Do not
-follow symbolic links.
+presentation tree from the returned flat paths, but the local storage adapter
+remains responsible for authoritative discovery, sorting, and safety checks. Do
+not follow symbolic links. S3 discovery is the corresponding paginated
+`ListObjectsV2` walk under the configured base prefix; it filters safe object
+keys using the same extension policy and excludes the destination prefix.
 
 ### Path comparison
 
@@ -1550,6 +1690,37 @@ temporary destination. For same-volume moves, emit a completed update after the
 no-replace publication succeeds because no byte stream is copied. Clamp values
 to the plan total and treat a successfully published zero-byte file as complete.
 The callback must not authorize, reorder, retry, or mutate an operation.
+
+### S3 object safety
+
+S3 has no real directories, rename primitive, or universally reliable atomic
+filesystem-style move. Treat prefixes as namespaces and object operations as
+explicit publication steps.
+
+- Normalize user-entered prefixes by rejecting absolute paths, backslashes,
+  control characters, and `.`/`..` components. Preserve meaningful title
+  characters in object keys; filename normalization happens before the final
+  key is joined.
+- Use `HeadObject` or the discovery snapshot to preflight a destination, but
+  never treat that preflight as the race-safe guarantee. `PutObject` and
+  `CompleteMultipartUpload` must use a no-replace condition, and
+  `CopyObject` must use a no-replace destination condition.
+- Capture source size and ETag where available. Use a conditional source ETag
+  for S3 copy and delete requests so another writer cannot silently cause a
+  move to operate on a different object version.
+- Verify the published destination with fresh metadata before deleting any
+  source object. A size mismatch, missing object, conditional failure, or
+  incomplete response preserves the source and reports a failed operation.
+- Use `ListObjectsV2` continuation tokens until the complete prefix has been
+  visited. Do not assume one response contains the whole source tree.
+- Do not create directory-marker objects for destinations. A prefix exists by
+  virtue of its objects, and an empty destination prefix is a valid configured
+  base path but not a valid source-and-destination identity.
+- Do not print authorization headers, signed URLs, secret values, or raw SDK
+  errors. Map SDK failures to safe typed storage errors.
+- Keep S3 credentials out of plan structs. A backend may hold credentials in
+  memory while it executes, but plans and reports contain only safe paths,
+  metadata, and statuses.
 
 ### Directory creation
 
@@ -1999,6 +2170,15 @@ necessary for safety or testability.
   unavailable; it must not bypass a required prompt.
 - Read `TMDB_LANGUAGE` only as a fallback default when the saved language is
   unavailable.
+- Persist the S3 access key and secret key only in the nested S3 profile of the
+  documented `~/.tmdbtag/config.json` file and in memory for the current
+  execution.
+- Read and use the S3 profile only after the user selects S3 as a source or
+  destination. A complete valid profile must not trigger another prompt during
+  normal organization.
+- Mask the S3 secret key in interactive input. The access key, secret key,
+  endpoint credentials, and any session material must be absent from Debug,
+  Display, plan, report, error, progress, and installer output.
 - Keep secret fields out of Debug, Display, error chains, snapshots, plans, and
   reports, except for the intentional JSON serialization inside the
   configuration storage boundary.
@@ -2007,6 +2187,7 @@ necessary for safety or testability.
 - Do not print configuration-file contents or include the API key in
   diagnostics.
 - Do not pass API keys through shell commands.
+- Do not pass S3 credentials through shell commands or command-line arguments.
 - Do not include tokens in URLs printed to the terminal.
 - Do not commit `config.json`, `.env`, or any other file containing real
   credentials.
@@ -2144,13 +2325,15 @@ This step should not need a network or terminal.
 
 ### Step 3: implement filesystem discovery
 
-- discover the current directory;
-- resolve the destination without creating it prematurely;
-- recursively discover root-level and nested regular files with recognized video
-  extensions;
-- exclude the destination subtree at every depth;
+- implement the local storage adapter for the current directory;
+- implement the S3 storage adapter for a configured bucket and base prefix;
+- resolve local destinations and S3 prefixes without creating or publishing
+  anything prematurely;
+- recursively discover root-level and nested local files, and paginated S3
+  objects, with recognized video extensions;
+- exclude the destination subtree or prefix at every depth;
 - sort deterministically;
-- test with temporary directories.
+- test with temporary directories and isolated backend fixtures.
 
 ### Step 4: implement the TMDB boundary
 
@@ -2162,7 +2345,18 @@ This step should not need a network or terminal.
 - implement bounded errors and timeouts;
 - test with mocked HTTP.
 
-### Step 5: implement planning
+### Step 5: implement storage abstraction and cross-storage planning
+
+- keep local paths and S3 object keys in typed `StoragePath` values;
+- expose one backend-neutral discovery and selection contract;
+- build one immutable plan for local, S3, and cross-storage operations;
+- verify source snapshots and destination conflicts before commit;
+- use service-side S3 copy/delete for S3-to-S3 moves;
+- use destination-side temporary files for S3-to-local transfers;
+- verify destinations before deleting any source;
+- test copy/move behavior and byte progress without production credentials.
+
+### Step 6: implement planning
 
 - combine source selections and verified TMDB metadata;
 - collect series episode values;
@@ -2171,7 +2365,7 @@ This step should not need a network or terminal.
 - render a plan-independent data structure;
 - test that a rejected plan causes no changes.
 
-### Step 6: implement the CLI flow
+### Step 7: implement the CLI flow
 
 - implement and verify the clap command parser and its help/version output;
 - integrate the interactive UI only at the terminal boundary;
@@ -2181,7 +2375,7 @@ This step should not need a network or terminal.
 - require negative-default confirmation;
 - keep all mutation behind the executor.
 
-### Step 7: implement safe movement
+### Step 8: implement safe movement
 
 - implement explicit source-preserving copy with independent destination data;
 - implement same-volume no-replace movement;
@@ -2189,9 +2383,11 @@ This step should not need a network or terminal.
 - verify copy before source removal;
 - emit aggregate byte progress during copies and logical completion for moves;
 - produce per-file execution results;
+- implement local-to-S3 uploads and S3-to-local downloads;
+- implement conditional S3 server-side copy and delete for S3 moves;
 - test failures and partial execution.
 
-### Step 8: harden and document
+### Step 9: harden and document
 
 - run the full validation suite;
 - inspect behavior on supported operating systems;
@@ -2226,6 +2422,9 @@ A change is done only when all applicable conditions are true:
 - Copy operations preserve every source file, including when verification fails.
 - Move operations preserve the source until destination publication is verified.
 - Cross-volume operations use destination-side temporary files.
+- Cross-storage operations use destination-side temporary files or conditional
+  S3 publication appropriate to the backend pair.
+- S3-to-S3 moves use server-side copy followed by conditional deletion.
 - Copy and move progress is reported from aggregate byte counts, not file count.
 - Secrets are not exposed.
 - Titles cannot escape the destination path.

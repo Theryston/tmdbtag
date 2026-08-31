@@ -6,9 +6,11 @@ use std::{
 use crate::{
     domain::{
         DestinationSelection, EpisodeRef, ExecutionReport, FileOperation, IdentificationMethod,
-        MediaType, OperationPlan, SourceRoot, TmdbItem, TmdbSearchCandidate, VideoFile,
+        MediaType, OperationPlan, SourceRoot, StorageKind, StorageRole, TmdbItem,
+        TmdbSearchCandidate, VideoFile,
     },
     error::{TmdbError, UiResult},
+    storage::{StorageDestination, StorageExecutionReport, StoragePlan, StorageVideoFile},
 };
 
 /// The severity of an application-owned terminal message.
@@ -50,6 +52,129 @@ pub trait InteractiveUi {
 
     /// Asks whether selected videos should be copied or moved.
     fn choose_file_operation(&mut self) -> UiResult<Option<FileOperation>>;
+
+    /// Selects the storage backend used for the source or destination role.
+    fn choose_storage(&mut self, role: StorageRole) -> UiResult<Option<StorageKind>> {
+        let items = vec![
+            "Local filesystem".to_owned(),
+            "S3-compatible object storage".to_owned(),
+        ];
+        let prompt = match role {
+            StorageRole::Source => "Where are the source files stored?",
+            StorageRole::Destination => "Where should organized files be written?",
+        };
+        match self.select_one(prompt, &items, false)? {
+            None => Ok(None),
+            Some(0) => Ok(Some(StorageKind::Local)),
+            Some(1) => Ok(Some(StorageKind::S3)),
+            Some(_) => Err(crate::error::UiError::InvalidSelection {
+                context: "storage backend",
+            }),
+        }
+    }
+
+    /// Asks for a backend-specific destination path or object prefix.
+    fn ask_storage_destination_path(&mut self, kind: StorageKind) -> UiResult<Option<String>> {
+        let prompt = match kind {
+            StorageKind::Local => "Local destination folder path",
+            StorageKind::S3 => {
+                "S3 destination prefix (relative to the configured base path; empty = base path)"
+            }
+        };
+        self.ask_text(prompt, None)
+    }
+
+    /// Confirms deferred creation of a missing local destination.
+    fn confirm_storage_destination_creation(
+        &mut self,
+        destination: &StorageDestination,
+        display_path: &str,
+    ) -> UiResult<Option<bool>> {
+        self.confirm(
+            &format!(
+                "Allow creation of destination {} after final confirmation?",
+                if display_path.is_empty() {
+                    destination.path().display()
+                } else {
+                    display_path.to_owned()
+                }
+            ),
+            false,
+        )
+    }
+
+    /// Presents all backend-discovered files in one expandable explorer or selector.
+    fn select_storage_video_files(
+        &mut self,
+        _source_description: &str,
+        files: &[StorageVideoFile],
+    ) -> UiResult<Option<Vec<usize>>> {
+        let items = files
+            .iter()
+            .map(|file| {
+                let size = file
+                    .size_bytes()
+                    .map(|size| format!(" · {}", format_file_size(size)))
+                    .unwrap_or_default();
+                format!("{}{}", file.relative_path(), size)
+            })
+            .collect::<Vec<_>>();
+        self.select_many("Select video files", &items, true)
+    }
+
+    /// Shows the active backend file while its metadata is collected.
+    fn show_storage_file_context(
+        &mut self,
+        current_file: usize,
+        total_files: usize,
+        file: &StorageVideoFile,
+    ) -> UiResult<()> {
+        self.show_message(
+            MessageLevel::Info,
+            &format!(
+                "File {current_file} of {total_files} · {}",
+                file.relative_path()
+            ),
+        )
+    }
+
+    /// Displays a complete cross-storage plan before the final confirmation.
+    fn show_storage_plan_preview(&mut self, plan: &StoragePlan) -> UiResult<()> {
+        self.show_message(
+            MessageLevel::Info,
+            &format!(
+                "Prepared a {} plan for {} file(s) from {} to {}.",
+                plan.operation().label(),
+                plan.operation_count(),
+                plan.source_description(),
+                plan.destination_description()
+            ),
+        )
+    }
+
+    /// Displays one final result for every cross-storage operation.
+    fn show_storage_execution_report(&mut self, report: &StorageExecutionReport) -> UiResult<()> {
+        self.show_message(
+            MessageLevel::Info,
+            &format!(
+                "Completed: {} · Failed: {} · Pending: {}",
+                report.completed_count(),
+                report.failed_count(),
+                report.pending_count()
+            ),
+        )
+    }
+
+    /// Decides whether the explicit config command should reopen the S3 profile.
+    ///
+    /// The default keeps existing test and non-terminal adapters compatible. A concrete terminal
+    /// UI should ask the user explicitly.
+    fn confirm_s3_configuration_update(
+        &mut self,
+        _has_existing_configuration: bool,
+    ) -> UiResult<Option<bool>> {
+        Ok(Some(false))
+    }
 
     /// Shows the active file line before its metadata prompts.
     ///

@@ -4,15 +4,19 @@ use std::{
 };
 
 use crate::{
-    config::{ConfigPromptMode, ConfigStore, StartupConfig, configure_interactively},
+    config::{
+        ConfigPromptMode, ConfigStore, S3Config, S3ConfigPromptMode, StartupConfig,
+        configure_interactively, configure_s3_interactively,
+    },
     domain::{
         EpisodeRef, FileOperation, FilesystemSelection, IdentificationMethod, OperationPlan,
-        PlannedOperation, RunOutcome, SelectedSource, SourceFolder, SourceRoot, TmdbId, TmdbItem,
-        TmdbSearchCandidate,
+        PlannedOperation, RunOutcome, SelectedSource, SourceFolder, SourceRoot, StorageKind,
+        StorageRole, TmdbId, TmdbItem, TmdbSearchCandidate,
     },
-    error::{AppError, AppResult, PlanningError, TmdbError, UiError},
+    error::{AppError, AppResult, ConfigError, PlanningError, TmdbError, UiError},
     filesystem::{self, DiscoveryWarning},
     naming::{generate_movie_filename, generate_series_filename},
+    storage::{self, LocalStorage, S3Storage, StorageBackend, StoragePlan, StorageSelection},
     tmdb::client::TmdbClient,
     ui::{InteractiveUi, MessageLevel, TmdbInteraction, display_relative_path},
 };
@@ -108,19 +112,63 @@ where
     ui.show_message(MessageLevel::Success, "TMDB configuration is ready.")?;
     let client = TmdbClient::new(&startup_config)?;
 
-    loop {
-        let Some(filesystem_selection) = collect_filesystem_selection(ui)? else {
-            ui.show_message(MessageLevel::Info, "Filesystem selection canceled.")?;
+    ui.show_step(1, 8, "Choose source storage")?;
+    let Some(source_kind) = ui.choose_storage(StorageRole::Source)? else {
+        ui.show_message(MessageLevel::Info, "Storage selection canceled.")?;
+        return Ok(RunOutcome::Cancelled);
+    };
+    ui.show_step(2, 8, "Choose destination storage")?;
+    let Some(destination_kind) = ui.choose_storage(StorageRole::Destination)? else {
+        ui.show_message(MessageLevel::Info, "Storage selection canceled.")?;
+        return Ok(RunOutcome::Cancelled);
+    };
+
+    let s3_config = if source_kind == StorageKind::S3 || destination_kind == StorageKind::S3 {
+        let Some(config) = configure_s3_interactively(ui, store, S3ConfigPromptMode::MissingOnly)?
+        else {
+            ui.show_message(MessageLevel::Info, "S3 configuration canceled.")?;
             return Ok(RunOutcome::Cancelled);
         };
-        ui.show_message(MessageLevel::Success, "Filesystem selection is ready.")?;
+        ui.show_message(MessageLevel::Success, "S3 configuration is ready.")?;
+        Some(config)
+    } else {
+        None
+    };
+    let source_backend = build_storage_backend(source_kind, s3_config.as_ref())?;
+    let destination_backend = build_storage_backend(destination_kind, s3_config.as_ref())?;
 
-        match organize_selection(ui, &filesystem_selection, &client) {
+    loop {
+        ui.show_step(3, 8, "Choose copy or move")?;
+        let Some(operation) = ui.choose_file_operation()? else {
+            ui.show_message(MessageLevel::Info, "Storage selection canceled.")?;
+            return Ok(RunOutcome::Cancelled);
+        };
+
+        ui.show_step(4, 8, "Choose destination")?;
+        let Some(selection) = collect_storage_selection(
+            ui,
+            source_backend.as_ref(),
+            destination_backend.as_ref(),
+            operation,
+        )?
+        else {
+            ui.show_message(MessageLevel::Info, "Storage selection canceled.")?;
+            return Ok(RunOutcome::Cancelled);
+        };
+        ui.show_message(MessageLevel::Success, "Storage selection is ready.")?;
+
+        match organize_storage_selection(
+            ui,
+            &selection,
+            source_backend.as_ref(),
+            destination_backend.as_ref(),
+            &client,
+        ) {
             Ok(outcome) => return Ok(outcome),
             Err(error) if is_recoverable_organization_error(&error) => {
                 ui.show_message(MessageLevel::Error, &error.to_string())?;
                 let Some(retry) =
-                    ui.confirm("Restart source selection and rebuild the plan?", true)?
+                    ui.confirm("Restart storage selection and rebuild the plan?", true)?
                 else {
                     return Ok(RunOutcome::Cancelled);
                 };
@@ -175,6 +223,20 @@ where
     };
 
     ui.show_message(MessageLevel::Success, "TMDB configuration saved.")?;
+    let has_s3_configuration = store.load_s3()?.is_some();
+    if ui.confirm_s3_configuration_update(has_s3_configuration)? == Some(true) {
+        let Some(_s3_config) =
+            configure_s3_interactively(ui, store, S3ConfigPromptMode::ReplaceAll)?
+        else {
+            ui.show_message(MessageLevel::Info, "S3 configuration update canceled.")?;
+            ui.show_message(
+                MessageLevel::Info,
+                &format!("Configuration file: {}", store.path().display()),
+            )?;
+            return Ok(RunOutcome::ConfigurationUpdated);
+        };
+        ui.show_message(MessageLevel::Success, "S3 configuration saved.")?;
+    }
     ui.show_message(
         MessageLevel::Info,
         &format!("Configuration file: {}", store.path().display()),
@@ -227,6 +289,292 @@ where
             }
         }
     }
+}
+
+fn build_storage_backend(
+    kind: StorageKind,
+    s3_config: Option<&S3Config>,
+) -> AppResult<Box<dyn StorageBackend>> {
+    match kind {
+        StorageKind::Local => Ok(Box::new(LocalStorage::new())),
+        StorageKind::S3 => {
+            let config = s3_config.ok_or(ConfigError::MissingS3AccessKey)?;
+            Ok(Box::new(S3Storage::new(config)?))
+        }
+    }
+}
+
+fn collect_storage_selection<U: InteractiveUi>(
+    ui: &mut U,
+    source_backend: &dyn StorageBackend,
+    destination_backend: &dyn StorageBackend,
+    operation: FileOperation,
+) -> AppResult<Option<StorageSelection>> {
+    let source_root = source_backend.source_root()?;
+    let Some(destination_input) = ui.ask_storage_destination_path(destination_backend.kind())?
+    else {
+        return Ok(None);
+    };
+    let destination = destination_backend.resolve_destination(&source_root, &destination_input)?;
+    destination_backend.validate_destination(&source_root, &destination)?;
+
+    if !destination.exists() && destination.may_create_after_confirmation() {
+        let destination_root = destination_backend
+            .source_root()
+            .unwrap_or_else(|_| source_root.clone());
+        let display_path = destination.path().display_relative_to(&destination_root);
+        if ui.confirm_storage_destination_creation(&destination, &display_path)? != Some(true) {
+            return Ok(None);
+        }
+    }
+
+    let discovery = source_backend.discover_videos(&source_root, Some(destination.path()))?;
+    for warning in discovery.warnings() {
+        ui.show_message(
+            MessageLevel::Warning,
+            &format!(
+                "Skipped {} during video discovery: {}",
+                warning.path(),
+                warning.reason()
+            ),
+        )?;
+    }
+    if discovery.items().is_empty() {
+        return Err(crate::error::StorageError::EmptyPlan.into());
+    }
+
+    let source_description = source_backend.description();
+    let Some(indices) = ui.select_storage_video_files(&source_description, discovery.items())?
+    else {
+        return Ok(None);
+    };
+    let mut files = Vec::with_capacity(indices.len());
+    for index in indices {
+        let file = discovery
+            .items()
+            .get(index)
+            .ok_or(UiError::InvalidSelection {
+                context: "storage video file",
+            })?;
+        files.push(file.clone());
+    }
+    if files.is_empty() {
+        return Err(crate::error::StorageError::EmptyPlan.into());
+    }
+
+    let destination_root = destination_backend
+        .source_root()
+        .unwrap_or_else(|_| source_root.clone());
+    let source_description = format!(
+        "{} · root {}",
+        source_description,
+        source_root.display_relative_to(&source_root)
+    );
+    let destination_description = format!(
+        "{} · {}",
+        destination_backend.description(),
+        destination.path().display_relative_to(&destination_root)
+    );
+
+    Ok(Some(StorageSelection::new(
+        source_root,
+        destination,
+        operation,
+        files,
+        source_description,
+        destination_description,
+    )))
+}
+
+fn organize_storage_selection<U, C>(
+    ui: &mut U,
+    selection: &StorageSelection,
+    source_backend: &dyn StorageBackend,
+    destination_backend: &dyn StorageBackend,
+    client: &C,
+) -> AppResult<RunOutcome>
+where
+    U: InteractiveUi + TmdbInteraction,
+    C: TmdbProvider,
+{
+    ui.show_step(6, 8, "Identify media and validate episodes")?;
+    let Some(plan) = build_storage_plan(ui, selection, source_backend, client)? else {
+        ui.show_message(
+            MessageLevel::Info,
+            "Organization canceled. No files were changed.",
+        )?;
+        return Ok(RunOutcome::Cancelled);
+    };
+
+    ui.show_step(7, 8, "Review and validate the operation plan")?;
+    storage::validate_plan(&plan, source_backend, destination_backend)?;
+    ui.show_storage_plan_preview(&plan)?;
+
+    let Some(confirmed) = ui.confirm(
+        &format!(
+            "{} and rename {} files?",
+            plan.operation().label(),
+            plan.operation_count()
+        ),
+        false,
+    )?
+    else {
+        ui.show_message(
+            MessageLevel::Info,
+            "Operation canceled. No files were changed.",
+        )?;
+        return Ok(RunOutcome::Cancelled);
+    };
+    if !confirmed {
+        ui.show_message(
+            MessageLevel::Info,
+            "Operation canceled. No files were changed.",
+        )?;
+        return Ok(RunOutcome::Cancelled);
+    }
+
+    let operation = plan.operation();
+    ui.show_step(8, 8, &format!("{} and rename files", operation.label()))?;
+    let activity = ui.start_activity(&format!(
+        "{} and renaming files...",
+        match operation {
+            FileOperation::Copy => "Copying",
+            FileOperation::Move => "Moving",
+        }
+    ))?;
+    activity.set_progress(0, plan.total_size_bytes());
+    let total = plan.operation_count();
+    let execution = storage::execute_plan_with_progress(
+        &plan,
+        source_backend,
+        destination_backend,
+        |progress| {
+            let index = progress.operation_index();
+            let planned = &plan.operations()[index];
+            activity.set_message(&format!(
+                "{} file {}/{}: {}",
+                match operation {
+                    FileOperation::Copy => "Copying",
+                    FileOperation::Move => "Moving",
+                },
+                index + 1,
+                total,
+                planned.source_display()
+            ));
+            activity.set_progress(progress.completed_bytes(), progress.total_bytes());
+        },
+    );
+    let report = match execution {
+        Ok(report) => report,
+        Err(error) => {
+            activity.finish_error("The storage operation could not start safely.");
+            return Err(error.into());
+        }
+    };
+    if report.is_success() {
+        activity.finish_success(&format!(
+            "All files {} successfully.",
+            match operation {
+                FileOperation::Copy => "copied",
+                FileOperation::Move => "moved",
+            }
+        ));
+    } else {
+        activity.finish_error(&format!(
+            "File {} stopped before every file was completed.",
+            match operation {
+                FileOperation::Copy => "copying",
+                FileOperation::Move => "movement",
+            }
+        ));
+    }
+    ui.show_storage_execution_report(&report)?;
+    if report.is_success() {
+        Ok(RunOutcome::Completed)
+    } else {
+        Ok(RunOutcome::PartiallyCompleted)
+    }
+}
+
+fn build_storage_plan<U, C>(
+    ui: &mut U,
+    selection: &StorageSelection,
+    source_backend: &dyn StorageBackend,
+    client: &C,
+) -> AppResult<Option<StoragePlan>>
+where
+    U: InteractiveUi + TmdbInteraction,
+    C: TmdbProvider,
+{
+    let mut operations = Vec::with_capacity(selection.files().len());
+    let mut episode_keys = HashSet::new();
+    let total_files = selection.files().len();
+
+    for (index, file) in selection.files().iter().enumerate() {
+        ui.show_storage_file_context(index + 1, total_files, file)?;
+        let Some(item) = identify_tmdb_item(ui, client)? else {
+            ui.finish_file_context()?;
+            return Ok(None);
+        };
+
+        let episode = match item.media_type {
+            crate::domain::MediaType::Movie => None,
+            crate::domain::MediaType::Series => {
+                let episode = loop {
+                    let Some(episode) =
+                        collect_series_episode(ui, client, item.id, file.relative_path())?
+                    else {
+                        ui.finish_file_context()?;
+                        return Ok(None);
+                    };
+                    if episode_keys.insert((item.id, episode)) {
+                        break episode;
+                    }
+                    ui.show_message(
+                        MessageLevel::Error,
+                        &format!(
+                            "Series {} episode S{:02}E{:02} was already assigned. Enter a different episode.",
+                            item.id,
+                            episode.season(),
+                            episode.episode()
+                        ),
+                    )?;
+                };
+                Some(episode)
+            }
+        };
+
+        let source_extension = source_backend.source_video_extension(file.path())?;
+        let normalized_filename = match episode {
+            Some(episode) => generate_series_filename(&item, episode, source_extension.as_str())?,
+            None => generate_movie_filename(&item, source_extension.as_str())?,
+        };
+        let source_snapshot = source_backend.snapshot(file.path())?;
+        let destination_path = selection
+            .destination()
+            .path()
+            .join_filename(&normalized_filename)?;
+        let destination_display =
+            destination_path.display_relative_to(selection.destination().path());
+
+        operations.push(crate::storage::StoragePlannedOperation::new(
+            file.path().clone(),
+            destination_path,
+            file.relative_path().to_owned(),
+            destination_display,
+            normalized_filename,
+            item,
+            episode,
+            source_extension,
+            source_snapshot,
+        ));
+        ui.finish_file_context()?;
+    }
+
+    if operations.is_empty() {
+        return Err(crate::error::StorageError::EmptyPlan.into());
+    }
+    Ok(Some(StoragePlan::new(selection, operations)))
 }
 
 /// Collects a complete, non-mutating filesystem selection from the process current directory.
@@ -693,7 +1041,10 @@ fn build_planned_operation(
 fn is_recoverable_organization_error(error: &AppError) -> bool {
     matches!(
         error,
-        AppError::Planning(_) | AppError::Naming(_) | AppError::Filesystem(_)
+        AppError::Planning(_)
+            | AppError::Naming(_)
+            | AppError::Filesystem(_)
+            | AppError::Storage(_)
     )
 }
 

@@ -20,9 +20,10 @@ use crate::{
     app,
     domain::{
         EpisodeRef, FileOperation, IdentificationMethod, MediaType, OperationStatus, RunOutcome,
-        SourceRoot, TmdbItem, TmdbSearchCandidate, VideoFile,
+        SourceRoot, StorageKind, StorageRole, TmdbItem, TmdbSearchCandidate, VideoFile,
     },
     error::{AppError, AppResult, TmdbError, UiError, UiResult},
+    storage::{StorageDestination, StorageExecutionReport, StoragePlan, StorageVideoFile},
     ui::{InteractiveUi, MessageLevel, ProgressOutput, TmdbInteraction},
 };
 
@@ -51,8 +52,8 @@ pub struct Cli {
 /// Explicit commands exposed by the clap boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Subcommand)]
 pub enum CliCommand {
-    /// Create or update the saved TMDB API key and metadata language.
-    #[command(about = "Create or update the saved TMDB configuration.")]
+    /// Create or update the saved TMDB and S3 storage configuration.
+    #[command(about = "Create or update the saved TMDB and S3 configuration.")]
     Config,
 }
 
@@ -100,6 +101,30 @@ struct VisibleExplorerEntry {
     depth: usize,
     is_directory: bool,
     expanded: bool,
+}
+
+struct MediaExplorerState {
+    expanded: BTreeSet<PathBuf>,
+    selected: Vec<bool>,
+    cursor: usize,
+    rendered_lines: usize,
+}
+
+impl MediaExplorerState {
+    fn new(file_count: usize) -> Self {
+        Self {
+            expanded: BTreeSet::new(),
+            selected: vec![false; file_count],
+            cursor: 0,
+            rendered_lines: 0,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct MediaExplorerContext<'a> {
+    subtitle: &'a str,
+    root_description: &'a str,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -534,23 +559,36 @@ impl TerminalUi {
         source_root: &Path,
         files: &[VideoFile],
     ) -> UiResult<Option<Vec<usize>>> {
+        let root_description = format!(
+            "Current directory: {}",
+            crate::ui::display_relative_path(source_root, source_root)
+        );
+        self.run_media_explorer_with_context(
+            source_root,
+            files,
+            "Select files from the current directory",
+            &root_description,
+        )
+    }
+
+    fn run_media_explorer_with_context(
+        &mut self,
+        source_root: &Path,
+        files: &[VideoFile],
+        subtitle: &str,
+        root_description: &str,
+    ) -> UiResult<Option<Vec<usize>>> {
         let explorer = MediaExplorer::from_files(source_root, files)?;
-        let mut expanded = BTreeSet::new();
-        let mut selected = vec![false; files.len()];
-        let mut cursor = 0;
-        let mut rendered_lines = 0;
+        let mut state = MediaExplorerState::new(files.len());
+        let context = MediaExplorerContext {
+            subtitle,
+            root_description,
+        };
 
         self.terminal.hide_cursor().map_err(UiError::Prompt)?;
-        let interaction = self.run_media_explorer_loop(
-            source_root,
-            &explorer,
-            &mut expanded,
-            &mut selected,
-            &mut cursor,
-            &mut rendered_lines,
-        );
+        let interaction = self.run_media_explorer_loop(source_root, &explorer, &mut state, context);
         if interaction.is_err() {
-            let _ = self.clear_rendered_lines(&mut rendered_lines);
+            let _ = self.clear_rendered_lines(&mut state.rendered_lines);
         }
         let restore_cursor = self.terminal.show_cursor().map_err(UiError::Prompt);
 
@@ -562,97 +600,97 @@ impl TerminalUi {
         &mut self,
         source_root: &Path,
         explorer: &MediaExplorer,
-        expanded: &mut BTreeSet<PathBuf>,
-        selected: &mut [bool],
-        cursor: &mut usize,
-        rendered_lines: &mut usize,
+        state: &mut MediaExplorerState,
+        context: MediaExplorerContext<'_>,
     ) -> UiResult<Option<Vec<usize>>> {
         let mut notice = None;
 
         loop {
-            let visible = explorer.visible_entries(expanded);
+            let visible = explorer.visible_entries(&state.expanded);
             if visible.is_empty() {
-                self.clear_rendered_lines(rendered_lines)?;
+                self.clear_rendered_lines(&mut state.rendered_lines)?;
                 return Err(UiError::EmptySelection {
                     context: "media explorer",
                 });
             }
-            *cursor = (*cursor).min(visible.len() - 1);
-            self.clear_rendered_lines(rendered_lines)?;
-            *rendered_lines = self.render_media_explorer(
+            state.cursor = state.cursor.min(visible.len() - 1);
+            self.clear_rendered_lines(&mut state.rendered_lines)?;
+            state.rendered_lines = self.render_media_explorer(
                 source_root,
                 &visible,
-                selected,
-                *cursor,
+                &state.selected,
+                state.cursor,
                 notice.as_deref(),
+                context,
             )?;
 
             let key = self.terminal.read_key().map_err(UiError::Prompt)?;
-            let current = &visible[*cursor];
+            let current = &visible[state.cursor];
             match key {
                 Key::ArrowDown | Key::Char('j') => {
-                    *cursor = (*cursor + 1) % visible.len();
+                    state.cursor = (state.cursor + 1) % visible.len();
                     notice = None;
                 }
                 Key::ArrowUp | Key::Char('k') => {
-                    *cursor = if *cursor == 0 {
+                    state.cursor = if state.cursor == 0 {
                         visible.len() - 1
                     } else {
-                        *cursor - 1
+                        state.cursor - 1
                     };
                     notice = None;
                 }
                 Key::Home => {
-                    *cursor = 0;
+                    state.cursor = 0;
                     notice = None;
                 }
                 Key::End => {
-                    *cursor = visible.len() - 1;
+                    state.cursor = visible.len() - 1;
                     notice = None;
                 }
                 Key::Tab => {
-                    if current.is_directory && !expanded.remove(&current.path) {
-                        expanded.insert(current.path.clone());
+                    if current.is_directory && !state.expanded.remove(&current.path) {
+                        state.expanded.insert(current.path.clone());
                     }
                     notice = None;
                 }
                 Key::BackTab => {
                     if current.is_directory {
-                        expanded.remove(&current.path);
+                        state.expanded.remove(&current.path);
                     } else if let Some(parent) = &current.parent
                         && let Some(parent_position) =
                             visible.iter().position(|entry| entry.path == *parent)
                     {
-                        *cursor = parent_position;
+                        state.cursor = parent_position;
                     }
                     notice = None;
                 }
                 Key::ArrowRight => {
                     if current.is_directory {
-                        expanded.insert(current.path.clone());
+                        state.expanded.insert(current.path.clone());
                     }
                     notice = None;
                 }
                 Key::ArrowLeft => {
-                    if current.is_directory && expanded.remove(&current.path) {
+                    if current.is_directory && state.expanded.remove(&current.path) {
                         notice = None;
                     } else if let Some(parent) = &current.parent {
                         if let Some(parent_position) =
                             visible.iter().position(|entry| entry.path == *parent)
                         {
-                            *cursor = parent_position;
+                            state.cursor = parent_position;
                         }
                         notice = None;
                     }
                 }
                 Key::Char(' ') => {
                     if let Some(file_index) = current.file_index {
-                        selected[file_index] = !selected[file_index];
+                        state.selected[file_index] = !state.selected[file_index];
                     }
                     notice = None;
                 }
                 Key::Enter => {
-                    let selected_indices = selected
+                    let selected_indices = state
+                        .selected
                         .iter()
                         .enumerate()
                         .filter_map(|(index, is_selected)| is_selected.then_some(index))
@@ -663,7 +701,7 @@ impl TerminalUi {
                         continue;
                     }
 
-                    self.clear_rendered_lines(rendered_lines)?;
+                    self.clear_rendered_lines(&mut state.rendered_lines)?;
                     self.write_line(&format!(
                         "✔ Selected {} video file(s).",
                         selected_indices.len()
@@ -671,7 +709,7 @@ impl TerminalUi {
                     return Ok(Some(selected_indices));
                 }
                 Key::Escape | Key::Char('q') | Key::CtrlC => {
-                    self.clear_rendered_lines(rendered_lines)?;
+                    self.clear_rendered_lines(&mut state.rendered_lines)?;
                     return Ok(None);
                 }
                 _ => {}
@@ -686,6 +724,7 @@ impl TerminalUi {
         selected: &[bool],
         cursor: usize,
         notice: Option<&str>,
+        context: MediaExplorerContext<'_>,
     ) -> UiResult<usize> {
         let terminal_height = usize::from(self.terminal.size().0);
         let row_capacity = terminal_height
@@ -701,12 +740,9 @@ impl TerminalUi {
         lines.push(format!(
             "{}  {}",
             dialoguer::console::style("Video explorer").cyan().bold(),
-            dialoguer::console::style("Select files from the current directory").dim()
+            dialoguer::console::style(context.subtitle).dim()
         ));
-        lines.push(format!(
-            "  Current directory: {}",
-            terminal_text(&crate::ui::display_relative_path(source_root, source_root))
-        ));
+        lines.push(format!("  {}", terminal_text(context.root_description)));
 
         for (visible_index, entry) in visible.iter().enumerate().skip(start).take(end - start) {
             let path = crate::ui::display_relative_path(&entry.path, source_root);
@@ -823,6 +859,194 @@ impl InteractiveUi for TerminalUi {
                 context: "file operation",
             }),
         }
+    }
+
+    fn choose_storage(&mut self, role: StorageRole) -> UiResult<Option<StorageKind>> {
+        let items = vec![
+            "Local filesystem".to_owned(),
+            "S3-compatible object storage".to_owned(),
+        ];
+        let prompt = match role {
+            StorageRole::Source => "Where are the source files stored?",
+            StorageRole::Destination => "Where should organized files be written?",
+        };
+        match self.select_one(prompt, &items, false)? {
+            None => Ok(None),
+            Some(0) => Ok(Some(StorageKind::Local)),
+            Some(1) => Ok(Some(StorageKind::S3)),
+            Some(_) => Err(UiError::InvalidSelection {
+                context: "storage backend",
+            }),
+        }
+    }
+
+    fn ask_storage_destination_path(&mut self, kind: StorageKind) -> UiResult<Option<String>> {
+        let prompt = match kind {
+            StorageKind::Local => "Local destination folder path",
+            StorageKind::S3 => {
+                "S3 destination prefix (relative to the configured base path; empty = base path)"
+            }
+        };
+        self.ask_text(prompt, None)
+    }
+
+    fn confirm_storage_destination_creation(
+        &mut self,
+        _destination: &StorageDestination,
+        display_path: &str,
+    ) -> UiResult<Option<bool>> {
+        self.confirm(
+            &format!("Allow creation of destination {display_path} after final confirmation?"),
+            false,
+        )
+    }
+
+    fn select_storage_video_files(
+        &mut self,
+        source_description: &str,
+        files: &[StorageVideoFile],
+    ) -> UiResult<Option<Vec<usize>>> {
+        if files.is_empty() {
+            return Err(UiError::EmptySelection {
+                context: "video file",
+            });
+        }
+
+        // The existing explorer is intentionally reused for S3 objects by projecting their
+        // relative object keys onto a virtual local root. The selected positions still refer to
+        // the original backend-owned file array, so no remote path is ever converted into a
+        // filesystem mutation target.
+        let virtual_root = PathBuf::from(".tmdbtag-storage-root");
+        let virtual_files = files
+            .iter()
+            .map(|file| VideoFile::new(virtual_root.join(file.relative_path()), file.size_bytes()))
+            .collect::<Vec<_>>();
+        let root_description = format!("Storage root: {source_description}");
+        self.run_media_explorer_with_context(
+            &virtual_root,
+            &virtual_files,
+            "Select files from the selected storage",
+            &root_description,
+        )
+    }
+
+    fn show_storage_file_context(
+        &mut self,
+        current_file: usize,
+        total_files: usize,
+        file: &StorageVideoFile,
+    ) -> UiResult<()> {
+        self.write_line("")?;
+        self.write_line(&format!(
+            "File {current_file} of {total_files} · {}",
+            terminal_text(file.relative_path())
+        ))
+    }
+
+    fn show_storage_plan_preview(&mut self, plan: &StoragePlan) -> UiResult<()> {
+        self.write_line("")?;
+        self.write_line(
+            &dialoguer::console::style("Storage operation preview")
+                .cyan()
+                .bold()
+                .to_string(),
+        )?;
+        self.write_line(&format!(
+            "Source: {}",
+            terminal_text(plan.source_description())
+        ))?;
+        self.write_line(&format!(
+            "Destination: {}",
+            terminal_text(plan.destination_description())
+        ))?;
+        self.write_line(&format!(
+            "Operation: {}{}",
+            plan.operation().label(),
+            if plan.operation().preserves_source() {
+                " (original files will be kept)"
+            } else {
+                " (original files will be removed after successful publication)"
+            }
+        ))?;
+        self.write_line(&format!("Total files: {}", plan.operation_count()))?;
+        self.write_line(&format!(
+            "Total bytes: {}",
+            crate::ui::format_file_size(plan.total_size_bytes())
+        ))?;
+        self.write_line("")?;
+
+        for operation in plan.operations() {
+            let item = operation.tmdb_item();
+            let episode = operation
+                .episode()
+                .map(|episode| format!(" · S{:02}E{:02}", episode.season(), episode.episode()))
+                .unwrap_or_default();
+            self.write_line(&format!(
+                "  {} -> {}",
+                terminal_text(operation.source_display()),
+                terminal_text(operation.destination_display())
+            ))?;
+            self.write_line(&format!(
+                "    TMDB: {} [{}] {}{episode}",
+                item.id,
+                item.media_type,
+                terminal_text(&item.title)
+            ))?;
+            self.write_line(&format!(
+                "    Filename: {}",
+                terminal_text(operation.normalized_filename())
+            ))?;
+        }
+        self.write_line("")
+    }
+
+    fn show_storage_execution_report(&mut self, report: &StorageExecutionReport) -> UiResult<()> {
+        self.write_line("")?;
+        self.write_line(
+            &dialoguer::console::style(format!("{} execution report", report.operation().label()))
+                .cyan()
+                .bold()
+                .to_string(),
+        )?;
+        self.write_line(&format!(
+            "Completed: {} · Failed: {} · Pending: {}",
+            report.completed_count(),
+            report.failed_count(),
+            report.pending_count()
+        ))?;
+        for result in report.results() {
+            match result.status() {
+                OperationStatus::Completed => self.write_line(&format!(
+                    "  ✔ Completed: {} -> {}",
+                    terminal_text(result.source_display()),
+                    terminal_text(result.destination_display())
+                ))?,
+                OperationStatus::Failed { reason } => self.write_line(&format!(
+                    "  ✘ Failed: {} -> {} ({})",
+                    terminal_text(result.source_display()),
+                    terminal_text(result.destination_display()),
+                    terminal_text(reason)
+                ))?,
+                OperationStatus::Pending => self.write_line(&format!(
+                    "  · Pending: {} -> {}",
+                    terminal_text(result.source_display()),
+                    terminal_text(result.destination_display())
+                ))?,
+            }
+        }
+        self.write_line("")
+    }
+
+    fn confirm_s3_configuration_update(
+        &mut self,
+        has_existing_configuration: bool,
+    ) -> UiResult<Option<bool>> {
+        let prompt = if has_existing_configuration {
+            "Update the saved S3 storage configuration now?"
+        } else {
+            "Configure S3 storage now?"
+        };
+        self.confirm(prompt, false)
     }
 
     fn show_file_context(

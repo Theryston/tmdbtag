@@ -336,12 +336,27 @@ pub fn discover_video_files_in_source_root(
     source_root: &SourceRoot,
     destination: &DestinationSelection,
 ) -> Result<Discovery<VideoFile>, FilesystemError> {
+    discover_video_files_in_source_root_with_exclusion(source_root, Some(destination.path()))
+}
+
+/// Recursively discovers every eligible video below the source root without excluding a
+/// destination subtree.
+pub fn discover_video_files_in_source_root_without_destination(
+    source_root: &SourceRoot,
+) -> Result<Discovery<VideoFile>, FilesystemError> {
+    discover_video_files_in_source_root_with_exclusion(source_root, None)
+}
+
+fn discover_video_files_in_source_root_with_exclusion(
+    source_root: &SourceRoot,
+    excluded_destination: Option<&Path>,
+) -> Result<Discovery<VideoFile>, FilesystemError> {
     let mut files = Vec::new();
     let mut warnings = Vec::new();
     discover_video_files_in_directory(
         source_root.path(),
         true,
-        Some(destination.path()),
+        excluded_destination,
         &mut files,
         &mut warnings,
     )?;

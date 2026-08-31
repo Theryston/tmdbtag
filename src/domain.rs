@@ -65,6 +65,50 @@ impl fmt::Display for FileOperation {
     }
 }
 
+/// A storage service that can provide source media or receive organized output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StorageKind {
+    /// The process current directory and the local operating-system filesystem.
+    Local,
+    /// An S3-compatible object bucket and its configured base prefix.
+    S3,
+}
+
+impl StorageKind {
+    /// Returns the stable label used by prompts, previews, and diagnostics.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Local => "Local",
+            Self::S3 => "S3",
+        }
+    }
+}
+
+impl fmt::Display for StorageKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.label())
+    }
+}
+
+/// The side of an organization workflow for which a storage choice is collected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageRole {
+    /// The place from which eligible videos are discovered.
+    Source,
+    /// The place to which generated names are published.
+    Destination,
+}
+
+impl StorageRole {
+    /// Returns the lowercase label used in interactive questions.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Source => "source",
+            Self::Destination => "destination",
+        }
+    }
+}
+
 /// Common video filename extensions supported by the discovery and naming layers.
 ///
 /// The policy is intentionally extension-based. Portable filesystem metadata does not provide a

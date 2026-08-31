@@ -14,6 +14,30 @@ pub enum ConfigError {
     /// The selected language is not a plausible TMDB locale tag.
     #[error("The TMDB metadata language must be a locale such as pt-BR or en-US.")]
     InvalidLanguage,
+    /// The S3 access key was not provided.
+    #[error("An S3 access key is required when S3 storage is selected.")]
+    MissingS3AccessKey,
+    /// The S3 secret key was not provided.
+    #[error("An S3 secret key is required when S3 storage is selected.")]
+    MissingS3SecretKey,
+    /// The S3 bucket name was not provided.
+    #[error("An S3 bucket name is required when S3 storage is selected.")]
+    MissingS3Bucket,
+    /// The S3 region was not provided.
+    #[error("An S3 region is required when S3 storage is selected.")]
+    MissingS3Region,
+    /// The S3 endpoint is not an HTTP(S) endpoint.
+    #[error("The S3 endpoint must be an HTTP or HTTPS URL with a host.")]
+    InvalidS3Endpoint,
+    /// The S3 base prefix contains unsafe path components.
+    #[error("The S3 base path must contain only safe object-key components.")]
+    InvalidS3BasePath,
+    /// The S3 signing region contains unsupported whitespace or control characters.
+    #[error("The S3 region is invalid.")]
+    InvalidS3Region,
+    /// The S3 bucket name contains unsupported whitespace or control characters.
+    #[error("The S3 bucket name is invalid.")]
+    InvalidS3Bucket,
     /// The current user's home directory could not be resolved.
     #[error("The current user's home directory could not be resolved.")]
     HomeDirectoryUnavailable,
@@ -64,7 +88,17 @@ impl ConfigError {
     /// Returns the exit code appropriate for a configuration failure.
     pub const fn exit_code(&self) -> i32 {
         match self {
-            Self::MissingApiKey | Self::InvalidLanguage | Self::InvalidFile { .. } => 2,
+            Self::MissingApiKey
+            | Self::InvalidLanguage
+            | Self::MissingS3AccessKey
+            | Self::MissingS3SecretKey
+            | Self::MissingS3Bucket
+            | Self::MissingS3Region
+            | Self::InvalidS3Endpoint
+            | Self::InvalidS3BasePath
+            | Self::InvalidS3Region
+            | Self::InvalidS3Bucket
+            | Self::InvalidFile { .. } => 2,
             Self::HomeDirectoryUnavailable
             | Self::Read { .. }
             | Self::CreateDirectory { .. }
@@ -573,6 +607,153 @@ impl FilesystemError {
     }
 }
 
+/// Errors raised by a configured storage backend or by a cross-storage transfer.
+///
+/// This type deliberately stores only safe operation descriptions. In particular, an SDK error
+/// is never retained or formatted because its debug representation could eventually contain
+/// request details that do not belong in normal CLI output.
+#[derive(Debug, Error)]
+pub enum StorageError {
+    /// The user confirmed an empty storage plan.
+    #[error("The storage operation plan must contain at least one video file.")]
+    EmptyPlan,
+    /// A local adapter operation failed.
+    #[error("The local storage operation failed while {operation}: {message}")]
+    Local {
+        /// The safe operation description.
+        operation: &'static str,
+        /// A sanitized operating-system explanation.
+        message: String,
+    },
+    /// An S3 request failed before a usable result was returned.
+    #[error(
+        "The S3 request failed while {operation}. Check the bucket, endpoint, region, and credentials."
+    )]
+    S3Request {
+        /// The safe S3 operation description.
+        operation: &'static str,
+    },
+    /// S3 rejected the configured credentials or authorization signature.
+    #[error(
+        "S3 authentication failed while {operation}. Check the access key, secret key, and permissions."
+    )]
+    S3Authentication {
+        /// The safe S3 operation description.
+        operation: &'static str,
+    },
+    /// S3 asked the client to slow down.
+    #[error("S3 rate limiting was encountered while {operation}. Retry the operation later.")]
+    S3RateLimited {
+        /// The safe S3 operation description.
+        operation: &'static str,
+    },
+    /// S3 returned a response that violated the expected object contract.
+    #[error("S3 returned an invalid response while {operation}.")]
+    S3InvalidResponse {
+        /// The safe S3 operation description.
+        operation: &'static str,
+    },
+    /// A storage path cannot be represented safely by the selected backend.
+    #[error("The storage path is invalid: {path} ({reason}).")]
+    InvalidPath {
+        /// A display-safe relative path or object key.
+        path: String,
+        /// The validation reason.
+        reason: &'static str,
+    },
+    /// The selected source disappeared or changed before publication.
+    #[error(
+        "The selected source changed or disappeared before it could be safely transferred: {path}"
+    )]
+    SourceChanged {
+        /// A display-safe source path.
+        path: String,
+    },
+    /// A destination object or file already exists.
+    #[error("The destination already exists: {path}")]
+    DestinationAlreadyExists {
+        /// A display-safe destination path.
+        path: String,
+    },
+    /// A source-to-destination transfer failed before publication completed.
+    #[error("The transfer from {source_path} to {destination} failed: {reason}")]
+    Transfer {
+        /// A display-safe source path.
+        source_path: String,
+        /// A display-safe destination path.
+        destination: String,
+        /// A safe transfer explanation.
+        reason: String,
+    },
+    /// A published destination could not be verified against the planned source size.
+    #[error("The destination could not be verified after transfer: {path}")]
+    CopyVerification {
+        /// A display-safe destination path.
+        path: String,
+    },
+    /// The local destination could not be created at the commit point.
+    #[error("The destination could not be created: {path} ({message})")]
+    DestinationCreation {
+        /// A display-safe destination path.
+        path: String,
+        /// A sanitized operating-system explanation.
+        message: String,
+    },
+    /// A local temporary file could not be published without replacement.
+    #[error(
+        "The destination could not be published without replacing existing data: {path} ({message})"
+    )]
+    DestinationPublication {
+        /// A display-safe destination path.
+        path: String,
+        /// A sanitized operating-system explanation.
+        message: String,
+    },
+    /// The source could not be removed after the destination was verified.
+    #[error(
+        "The destination was published, but the source could not be removed: {path} ({message})"
+    )]
+    SourceRemoval {
+        /// A display-safe source path.
+        path: String,
+        /// A sanitized operating-system explanation.
+        message: String,
+    },
+    /// A temporary local artifact could not be removed after an unsuccessful transfer.
+    #[error("A temporary transfer artifact could not be cleaned up: {path} ({message})")]
+    TemporaryCleanup {
+        /// A display-safe temporary path.
+        path: String,
+        /// A sanitized operating-system explanation.
+        message: String,
+    },
+    /// The requested backend combination is not supported by the current adapter.
+    #[error("This storage transfer is not supported by the selected backends.")]
+    UnsupportedTransfer,
+}
+
+impl StorageError {
+    /// Returns the process exit code appropriate for storage failures.
+    pub const fn exit_code(&self) -> i32 {
+        match self {
+            Self::EmptyPlan | Self::InvalidPath { .. } | Self::DestinationAlreadyExists { .. } => 2,
+            Self::Local { .. }
+            | Self::S3Request { .. }
+            | Self::S3Authentication { .. }
+            | Self::S3RateLimited { .. }
+            | Self::S3InvalidResponse { .. }
+            | Self::SourceChanged { .. }
+            | Self::Transfer { .. }
+            | Self::CopyVerification { .. }
+            | Self::DestinationCreation { .. }
+            | Self::DestinationPublication { .. }
+            | Self::SourceRemoval { .. }
+            | Self::TemporaryCleanup { .. }
+            | Self::UnsupportedTransfer => 1,
+        }
+    }
+}
+
 /// Errors raised at the interactive terminal boundary.
 #[derive(Debug, Error)]
 pub enum UiError {
@@ -629,6 +810,9 @@ pub enum AppError {
     /// Filesystem discovery or destination validation failed.
     #[error(transparent)]
     Filesystem(#[from] FilesystemError),
+    /// Storage discovery, S3 access, validation, or cross-storage execution failed.
+    #[error(transparent)]
+    Storage(#[from] StorageError),
     /// The normal wizard requires an interactive terminal.
     #[error("This command requires an interactive terminal with stdin and stderr attached.")]
     NonInteractive,
@@ -647,6 +831,7 @@ impl AppError {
             Self::Naming(_) => 2,
             Self::Planning(_) => 2,
             Self::Filesystem(error) => error.exit_code(),
+            Self::Storage(error) => error.exit_code(),
             Self::NonInteractive => 2,
             Self::Ui(_) => 1,
         }

@@ -49,8 +49,11 @@ The normal workflow is intentionally easy to understand:
 tmdbtag
   │
   ├─ Load or collect your TMDB API key and metadata language
+  ├─ Choose the source storage (local filesystem or S3)
+  ├─ Choose the destination storage (local filesystem or S3)
+  ├─ Configure the saved S3 profile when it is needed
   ├─ Choose Copy or Move
-  ├─ Choose the destination library
+  ├─ Choose the destination folder or object prefix
   ├─ Select videos from the recursive file explorer
   ├─ Identify each file with live TMDB search or a direct ID
   ├─ Enter and validate episode data for series
@@ -119,18 +122,26 @@ The guided session looks like this:
 1. `tmdbtag` loads the current user's configuration.
 2. If needed, it securely asks for the TMDB API key and asks which language TMDB
    should use for metadata.
-3. It asks whether the operation should be `Copy` or `Move`.
-4. It asks where the organized files should be written.
-5. It scans the current working directory recursively and opens one unified
-   video explorer.
-6. You expand folders, select individual videos, and confirm the selected array.
-7. For each selected file, you search TMDB live or enter a TMDB ID manually.
-8. For series, you enter a season and episode, which are validated against TMDB.
-9. It builds and displays the complete plan, including every destination name.
-10. A final confirmation starts the operation. The default is always negative.
+3. It asks where the source files live: the local filesystem or S3-compatible
+   object storage.
+4. It asks where the organized files should be written: locally or in S3.
+5. If either side is S3 and no complete profile is saved, it securely asks for
+   the S3 access key, secret key, bucket, base path, optional endpoint, and
+   region. Leaving the endpoint empty uses AWS's standard S3 endpoint.
+6. It asks whether the operation should be `Copy` or `Move`.
+7. It asks for a local destination folder or an S3 destination prefix.
+8. It scans the selected source recursively and opens one unified video
+   explorer.
+9. You expand folders, select individual videos, and confirm the selected array.
+10. For each selected file, you search TMDB live or enter a TMDB ID manually.
+11. For series, you enter a season and episode, which are validated against
+    TMDB.
+12. It builds and displays the complete plan, including every destination name.
+13. A final confirmation starts the operation. The default is always negative.
 
-The directory where you launch the command is the source root. The executable's
-location is not used as the source root.
+When local storage is selected, the directory where you launch the command is
+the source root; the executable's location is not used as the source root. When
+S3 is selected, the configured bucket and base path are the source root.
 
 ## Commands
 
@@ -138,14 +149,15 @@ The command surface is intentionally small:
 
 ```bash
 tmdbtag              # Start the interactive organization workflow
-tmdbtag config       # Reopen and update both TMDB configuration fields
+tmdbtag config       # Reopen and update TMDB and optionally S3 configuration
 tmdbtag --help       # Show help without starting the wizard
 tmdbtag --version    # Show the installed version
 ```
 
-`tmdbtag config` uses the same validation, prompts, persistence, and secret
-handling as the normal startup flow. It changes configuration only; it never
-scans media or starts a copy/move operation.
+The `tmdbtag config` command uses the same validation, prompts, persistence, and
+secret handling as the normal startup flow. It always reopens the TMDB fields
+and then offers to configure or replace the saved S3 profile. It changes
+configuration only; it never scans media or starts a copy/move operation.
 
 Help, version, command-help, and invalid-command paths are handled by `clap`
 before the wizard. They do not require a TMDB key, a network connection, or a
@@ -176,6 +188,58 @@ The API key is stored only in:
 On Unix-like systems, `tmdbtag` uses private permissions for the configuration
 directory and file when it creates them. The key is never included in filenames,
 previews, plans, logs, errors, or debug output.
+
+### Storage selection and S3 profiles
+
+After TMDB configuration, the organization wizard asks for two independent
+backends:
+
+- **Source storage** — the local filesystem or S3-compatible object storage.
+- **Destination storage** — the local filesystem or S3-compatible object
+  storage.
+
+The first S3-enabled run asks for one profile containing:
+
+- access key;
+- secret key, entered with masked input;
+- bucket name;
+- optional base path/prefix;
+- optional custom endpoint URL; pressing Enter uses `https://s3.amazonaws.com`,
+  the standard AWS S3 endpoint;
+- signing region.
+
+The profile is stored beside the TMDB settings in `~/.tmdbtag/config.json`. When
+it is complete and valid, later organization runs reuse it without asking for
+the fields again. The `tmdbtag config` command offers an explicit way to replace
+it. Credentials are held in memory only for the current process after loading
+and are never rendered in previews, progress messages, errors, or debug output.
+
+The S3 endpoint is optional. Leave it empty to use AWS's standard endpoint,
+`https://s3.amazonaws.com`. Provide a custom endpoint only when using an
+S3-compatible service that requires one, such as a self-hosted or alternative
+object-storage provider.
+
+The base path is the S3 equivalent of the source root. Source discovery lists
+objects beneath that prefix recursively, and an S3 destination is entered as a
+prefix relative to it. An empty destination prefix means the configured base
+path itself. S3 object keys are shown relative to the configured source or
+destination prefix, just as local paths are shown relative to the current
+directory.
+
+The same organization plan supports all combinations:
+
+| Source | Destination | Transfer behavior                                                  |
+| ------ | ----------- | ------------------------------------------------------------------ |
+| Local  | Local       | Verified destination-side local copy                               |
+| Local  | S3          | Bounded local-to-S3 upload                                         |
+| S3     | Local       | S3 download to a local temporary file, then no-replace publication |
+| S3     | S3          | S3 server-side object copy                                         |
+
+For `Move`, the destination is always verified first. A local-to-S3 or
+S3-to-local move removes the source only after the cross-storage copy has
+published successfully. An S3-to-S3 move uses server-side `CopyObject` followed
+by a conditional source deletion; it does not download the object through the
+CLI.
 
 ### One explorer for the whole source tree
 
@@ -322,10 +386,10 @@ The title is a display hint. The TMDB ID is the durable lookup key.
 
 ## Safety you can see
 
-`tmdbtag` treats file operations as a two-phase process:
+`tmdbtag` treats local and S3 operations as a two-phase process:
 
 ```text
-Discover → Identify → Build plan → Validate everything → Preview → Confirm → Execute → Report
+Configure → Select storages → Discover → Identify → Build plan → Validate everything → Preview → Confirm → Execute → Report
 ```
 
 No file is copied, moved, renamed, or deleted while the user is still
@@ -337,9 +401,11 @@ names, collisions, and relevant filesystem state. A destination that does not
 exist may be created only after explicit confirmation, and its actual creation
 is deferred until the commit phase.
 
-The destination cannot be the current source directory, cannot overlap a
+The local destination cannot be the current source directory, cannot overlap a
 selected nested source container, and is excluded from discovery when it is
-inside the current source tree.
+inside the current source tree. For S3, the configured base prefix cannot also
+be the destination prefix, and the destination prefix is excluded from source
+listing when both sides use the same S3 profile.
 
 `tmdbtag` never overwrites an existing destination by default. If a source
 disappears or changes, or an unexpected operation fails, execution stops by
@@ -354,14 +420,18 @@ default and the final report separates:
 Copies stream bytes to a destination-side temporary file. The temporary file is
 verified against the source before the final name is published with no-replace
 semantics. A failed or interrupted copy leaves the source intact and does not
-make a partial file look complete.
+make a partial file look complete. S3 uploads use a no-replace precondition;
+large local uploads use bounded multipart parts, while S3-to-S3 copies use the
+service-side copy operation.
 
 ### Move safety
 
-Same-volume moves use a no-replace publication strategy where the platform
+Same-volume local moves use a no-replace publication strategy where the platform
 permits it, then remove the source only after the destination is known to exist.
-Cross-volume moves use the same verified temporary-copy process as a copy and
-remove the source only after successful publication.
+Cross-volume and cross-storage moves use the same verified temporary-copy
+process as a copy and remove the source only after successful publication. An
+S3-to-S3 move is a conditional server-side copy followed by a conditional delete
+of the original object.
 
 ### Real byte-based progress
 
@@ -371,10 +441,11 @@ The aggregate progress percentage is calculated from bytes:
 completed source bytes ÷ total planned source bytes × 100
 ```
 
-For copies and cross-volume moves, progress advances as chunks are written. For
-safe same-volume moves, the file's bytes are marked complete after its
-publication succeeds because no byte stream needs to be transferred. Zero-byte
-files are treated as complete once published.
+For local transfers and S3 uploads/downloads, progress advances as chunks or
+bounded parts are transferred. For server-side S3 copies and safe same-volume
+moves, the file's bytes are marked complete after publication succeeds because
+no client-side byte stream needs to be transferred. Zero-byte files are treated
+as complete once published.
 
 ## Supported video files
 
@@ -397,7 +468,15 @@ The persisted configuration is small and explicit:
 ```json
 {
   "tmdb_api_key": "your-tmdb-api-key",
-  "tmdb_language": "pt-BR"
+  "tmdb_language": "pt-BR",
+  "s3": {
+    "access_key": "your-s3-access-key",
+    "secret_key": "your-s3-secret-key",
+    "bucket": "your-bucket",
+    "base_path": "optional/media/prefix",
+    "endpoint": "https://s3.example.com",
+    "region": "us-east-1"
+  }
 }
 ```
 
@@ -411,15 +490,16 @@ The language controls the language requested from TMDB for titles and metadata.
 It does not translate the CLI. All application-owned prompts, labels, help text,
 progress messages, errors, and reports are in English.
 
-To change both values intentionally:
+To change the TMDB values intentionally, and optionally replace the S3 profile:
 
 ```bash
 tmdbtag config
 ```
 
-The command asks for both fields even when a complete configuration already
-exists. It is the supported way to replace a key or switch metadata language
-without starting a media workflow.
+The command asks for both TMDB fields even when a complete configuration already
+exists. It then asks whether the S3 profile should be configured or replaced. It
+is the supported way to replace credentials or switch metadata language without
+starting a media workflow.
 
 For local automation or development environments, `TMDB_API_KEY` and
 `TMDB_LANGUAGE` may provide fallback defaults for missing saved fields. They do
