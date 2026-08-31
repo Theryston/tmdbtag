@@ -8,7 +8,7 @@ use crate::{
         DestinationSelection, EpisodeRef, ExecutionReport, IdentificationMethod, MediaType,
         OperationPlan, SourceRoot, TmdbItem, TmdbSearchCandidate, VideoFile,
     },
-    error::UiResult,
+    error::{TmdbError, UiResult},
 };
 
 /// The severity of an application-owned terminal message.
@@ -195,12 +195,16 @@ pub trait TmdbInteraction {
     /// Asks which TMDB namespace a manually entered ID belongs to.
     fn choose_media_type(&mut self) -> UiResult<Option<MediaType>>;
 
-    /// Collects a non-empty search query.
-    fn ask_search_query(&mut self) -> UiResult<Option<String>>;
-
-    /// Displays typed TMDB candidates and returns the selected candidate position.
-    fn select_tmdb_result(&mut self, candidates: &[TmdbSearchCandidate])
-    -> UiResult<Option<usize>>;
+    /// Runs a debounced, keyboard-driven TMDB search and returns the selected candidate.
+    ///
+    /// The UI owns the query editor, debounce timing, result rendering, and keyboard selection.
+    /// The application supplies the search callback so HTTP transport and TMDB policy remain
+    /// outside the terminal adapter. The nested result distinguishes UI failures from typed TMDB
+    /// request failures, allowing the application to offer its normal retry policy.
+    fn select_tmdb_result_live(
+        &mut self,
+        search: &mut dyn FnMut(&str) -> Result<Vec<TmdbSearchCandidate>, TmdbError>,
+    ) -> UiResult<Result<Option<TmdbSearchCandidate>, TmdbError>>;
 
     /// Collects a raw ID string so the application can validate it at the domain boundary.
     fn ask_tmdb_id(&mut self) -> UiResult<Option<String>>;

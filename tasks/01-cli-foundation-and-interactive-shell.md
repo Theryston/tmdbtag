@@ -31,7 +31,8 @@ The foundation uses:
 
 - `clap` for the command-line parser, help, version, and usage diagnostics;
 - `dialoguer` for masked secrets, text input, keyboard selection, and multiple selection;
-- an adapter-level case-insensitive filter for searchable long lists before displaying selection controls;
+- `crossterm` for polled raw keyboard events used by the live remote-search selector;
+- an adapter-level case-insensitive filter for generic searchable long lists before displaying selection controls;
 - `indicatif` for spinner/progress contracts;
 - `thiserror` for typed configuration, UI, and application errors.
 

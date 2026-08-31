@@ -20,7 +20,10 @@ The task is implemented across the following boundaries:
 - `src/tmdb/models.rs` keeps TMDB response structs separate from the application's domain models and applies title fallback, year extraction, adult-result filtering, ID checks, and media-type checks.
 - `src/domain.rs` owns positive TMDB IDs, typed media types, non-negative episode references, search candidates, verified items, and verified episodes.
 - `src/app.rs` exposes reusable identification and episode-validation workflows that keep prompts, retries, confirmation, and TMDB calls separate from filesystem operations.
-- `src/cli.rs` implements the English interactive TMDB method, result-selection, confirmation, and episode-input controls behind the renderer-neutral UI traits.
+- `src/cli.rs` implements the English interactive TMDB method, debounced live result selector,
+  confirmation, and episode-input controls behind the renderer-neutral UI traits. The live selector
+  uses `crossterm` only for polled keyboard events and raw-mode lifecycle; the application still
+  supplies the search callback and owns TMDB policy.
 
 Credential validation uses `GET /3/configuration` before the future filesystem-selection stage. Search
 uses the movie and TV endpoints separately, always sends the configured language and
@@ -96,7 +99,11 @@ Each displayed candidate should include, when available:
 
 Search behavior must:
 
-- allow the query to be repeated;
+- keep the query and result list in one live interactive control;
+- debounce requests for approximately 300 ms after the last edit;
+- avoid requests for empty queries and queries shorter than two non-whitespace characters;
+- clear stale results when the query changes;
+- support `Up`/`Down` result navigation, `Enter` selection, and `Escape` cancellation;
 - limit or paginate displayed results so the terminal remains usable;
 - never silently choose the first result;
 - fetch details for the selected result;

@@ -470,7 +470,7 @@ Before adding a dependency:
 
 clap is a required dependency, but its exact version must still be selected according to the project's supported Rust toolchain. The interactive prompt/rendering library is a separate dependency and must be evaluated for keyboard navigation, multiple selection, search, styling, terminal fallback, maintenance, and platform support. Do not invent a package name or put an unverified crate into Cargo.toml.
 
-Task 01 selected `clap` for command parsing, `dialoguer` for interactive prompts and keyboard selection, `indicatif` for spinner/progress feedback, and `thiserror` for typed errors. The configuration and TMDB follow-up adds `serde` and `serde_json` for the documented per-user JSON file and API mappings, `reqwest` with Rustls for bounded HTTPS requests, and `tempfile` as a test-only dependency for isolated configuration tests. These dependencies must remain behind the appropriate boundaries. The current dialoguer adapter provides searchable selection by filtering long lists before handing the visible options to its selection controls; callers must not depend on dialoguer types directly. TMDB client tests use a local standard-library loopback server, so they do not require live credentials or network data.
+Task 01 selected `clap` for command parsing, `dialoguer` for standard interactive prompts and keyboard selection, `crossterm` for polled raw keyboard events in the live TMDB selector, `indicatif` for spinner/progress feedback, and `thiserror` for typed errors. The configuration and TMDB follow-up adds `serde` and `serde_json` for the documented per-user JSON file and API mappings, `reqwest` with Rustls for bounded HTTPS requests, and `tempfile` as a test-only dependency for isolated configuration tests. These dependencies must remain behind the appropriate boundaries. The dialoguer adapter still provides the generic searchable selection behavior required by other lists, while the TMDB selector owns its live query and remote-result interaction in a focused crossterm-backed control. Callers must not depend on dialoguer or crossterm types directly. TMDB client tests use a local standard-library loopback server, so they do not require live credentials or network data.
 
 For a binary application, Cargo.lock should be generated and versioned once dependencies are introduced, unless the repository's explicit policy changes.
 
@@ -545,6 +545,7 @@ It should:
 - dispatch the default organization wizard and the `config` subcommand;
 - render the interactive wizard through a dedicated terminal UI adapter;
 - collect text, masked secrets, language choices, single-choice, multiple-choice, confirmation, and numeric input;
+- render the debounced live TMDB query/result selector while receiving search behavior through an application-supplied callback;
 - show step indicators, progress, previews, warnings, errors, and reports;
 - translate typed application results into consistent English user-facing messages;
 - expose cancellation as a normal control-flow result;
@@ -886,6 +887,12 @@ The selected language comes from startup configuration and defaults to pt-BR. It
 - Do not expose people, keywords, or unrelated media types as choices.
 - Display type, ID, title, and year when available.
 - Preserve enough result information to build a detail request.
+- Use a live keyboard-driven query editor instead of a separate query prompt followed by a filter
+  prompt.
+- Debounce live searches for approximately 300 ms after the last query edit.
+- Do not search an empty query or a query shorter than two non-whitespace characters.
+- Invalidate the visible candidate list whenever the query changes.
+- Allow `Up`/`Down` navigation and require `Enter` for explicit selection; `Escape` cancels.
 - Limit or paginate result display.
 - Return control to the user when no result is found.
 - Never auto-select a result because it is first, popular, or close enough.

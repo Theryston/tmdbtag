@@ -354,25 +354,39 @@ After the unified video array is confirmed, present two options for each selecte
 
 #### Text search
 
-The prompt must:
+The search must open a live, keyboard-driven selector rather than a separate query prompt followed
+by a second filter prompt. The selector must:
 
-- accept the entered text;
-- search movies and TV series;
-- display paginated results or a limited result set;
-- clearly distinguish the result type;
+- keep the query editable while the result list is visible;
+- start a search after the user stops typing for a short debounce interval of approximately 300 ms;
+- avoid sending a request for an empty query and avoid sending a request for fewer than two
+  non-whitespace characters;
+- search both movies and TV series through the documented endpoints;
+- replace stale results as soon as the query changes, so Enter cannot select a result for an older
+  query;
+- clearly distinguish each result type;
 - show at least the ID, type, title, and year when available;
-- allow a result to be selected;
-- allow the search to be repeated;
+- allow result navigation with `Up`/`Down` and selection with `Enter`;
+- allow `Escape` to cancel the current search interaction;
 - never silently choose the first result.
+
+The live search may show a bounded result window so it remains usable in a small terminal. The
+selected candidate is still fetched through its details endpoint and explicitly confirmed before it
+enters the operation plan.
 
 Example presentation:
 
 ~~~text
-Results for: the office
+TMDB live search · Search movies and TV series as you type
+Query: the office
+4 result(s) found.
 
-1. [SERIES] 2316  The Office                 (2001)
-2. [SERIES] 2315  The Office                 (1995)
-3. [MOVIE]  ...   The Office                 (year)
+Results: 4 · Up/Down choose · Enter select
+› [SERIES] 2316 The Office (2001)
+  [SERIES] 2315 The Office (1995)
+  [MOVIE]  ... The Office (year)
+
+Type to search · Up/Down choose · Enter select · Esc cancel
 ~~~
 
 After a result is selected, the program must fetch the item's details and show an identification confirmation before building the plan.
@@ -736,7 +750,8 @@ Search results must be filtered to movies and TV series. People, keywords, and o
 
 ### Request rules
 
-- every search must be performed in real time;
+- every non-empty live-search query must be performed after the debounce interval, with no request
+  made for the empty query or a query shorter than two non-whitespace characters;
 - do not maintain persistent caching in the MVP;
 - an in-memory cache may be used during one execution to avoid repeating the same request;
 - use a finite timeout;
@@ -960,7 +975,7 @@ title-tmdb-file/
     └── fixtures/
 ~~~
 
-Task 01 and Task 02 currently implement `clap` for command parsing, `dialoguer` for password/text/select/multi-select controls, `indicatif` for activity feedback, `reqwest` with Rustls for bounded HTTPS requests, and `serde`/`serde_json` for the documented configuration and TMDB response mappings. These libraries are implementation details behind the CLI/UI/TMDB boundaries and may be replaced only after the interaction contract, safety guarantees, and user experience are preserved.
+Task 01 and Task 02 currently implement `clap` for command parsing, `dialoguer` for password/text/select/multi-select controls, `crossterm` for polled raw keyboard events in the live TMDB selector, `indicatif` for activity feedback, `reqwest` with Rustls for bounded HTTPS requests, and `serde`/`serde_json` for the documented configuration and TMDB response mappings. These libraries are implementation details behind the CLI/UI/TMDB boundaries and may be replaced only after the interaction contract, safety guarantees, and user experience are preserved.
 
 This is a suggested organization, not a requirement to create every file immediately. The important rule is to keep the UI, TMDB, filesystem, and filename-composition concerns decoupled.
 

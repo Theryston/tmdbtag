@@ -3,10 +3,14 @@ use std::{
     collections::{BTreeMap, BTreeSet, btree_map::Entry},
     io,
     path::{Component, Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use clap::{Parser, Subcommand};
+use crossterm::{
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    terminal::{disable_raw_mode, enable_raw_mode},
+};
 use dialoguer::{
     Confirm, Input, MultiSelect, Password, Select, console::Key, theme::ColorfulTheme,
 };
@@ -18,12 +22,16 @@ use crate::{
         EpisodeRef, IdentificationMethod, MediaType, OperationStatus, RunOutcome, SourceRoot,
         TmdbItem, TmdbSearchCandidate, VideoFile,
     },
-    error::{AppError, AppResult, UiError, UiResult},
+    error::{AppError, AppResult, TmdbError, UiError, UiResult},
     ui::{InteractiveUi, MessageLevel, ProgressOutput, TmdbInteraction},
 };
 
 const MULTI_SELECT_SEARCH_THRESHOLD: usize = 10;
 const MEDIA_EXPLORER_RESERVED_LINES: usize = 6;
+const TMDB_LIVE_SEARCH_DEBOUNCE_MS: u64 = 300;
+const TMDB_LIVE_SEARCH_MIN_QUERY_CHARS: usize = 2;
+const TMDB_LIVE_SEARCH_IDLE_POLL: Duration = Duration::from_secs(60 * 60);
+const TMDB_LIVE_SEARCH_RESERVED_LINES: usize = 6;
 
 /// Command-line arguments for the default interactive workflow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Parser)]
@@ -94,6 +102,110 @@ struct VisibleExplorerEntry {
     depth: usize,
     is_directory: bool,
     expanded: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum LiveSearchStatus {
+    #[default]
+    Empty,
+    TooShort,
+    Waiting,
+    Searching,
+    Ready,
+    NoResults,
+}
+
+#[derive(Debug, Default)]
+struct LiveSearchState {
+    query: Vec<char>,
+    cursor: usize,
+    selected_result: usize,
+    candidates: Vec<TmdbSearchCandidate>,
+    searched_query: Option<String>,
+    search_due_at: Option<Instant>,
+    status: LiveSearchStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LiveSearchAction {
+    Continue,
+    Cancel,
+    Accept,
+}
+
+#[derive(Debug)]
+struct RawModeGuard;
+
+impl RawModeGuard {
+    fn enter() -> io::Result<Self> {
+        enable_raw_mode()?;
+        Ok(Self)
+    }
+}
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+    }
+}
+
+impl LiveSearchState {
+    fn query(&self) -> String {
+        self.query.iter().collect()
+    }
+
+    fn trimmed_query(&self) -> String {
+        self.query().trim().to_owned()
+    }
+
+    fn query_changed(&mut self) {
+        self.candidates.clear();
+        self.searched_query = None;
+        self.selected_result = 0;
+        let query_length = self.trimmed_query().chars().count();
+        self.status = match query_length {
+            0 => LiveSearchStatus::Empty,
+            1..TMDB_LIVE_SEARCH_MIN_QUERY_CHARS => LiveSearchStatus::TooShort,
+            _ => LiveSearchStatus::Waiting,
+        };
+        self.search_due_at = (query_length >= TMDB_LIVE_SEARCH_MIN_QUERY_CHARS)
+            .then(|| Instant::now() + Duration::from_millis(TMDB_LIVE_SEARCH_DEBOUNCE_MS));
+    }
+
+    fn search_is_due(&self) -> bool {
+        self.search_due_at
+            .is_some_and(|deadline| Instant::now() >= deadline)
+    }
+
+    fn search_wait(&self) -> Duration {
+        self.search_due_at
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+            .unwrap_or(TMDB_LIVE_SEARCH_IDLE_POLL)
+    }
+
+    fn begin_search(&mut self) {
+        self.status = LiveSearchStatus::Searching;
+        self.search_due_at = None;
+    }
+
+    fn complete_search(&mut self, query: String, candidates: Vec<TmdbSearchCandidate>) {
+        self.searched_query = Some(query);
+        self.selected_result = 0;
+        self.status = if candidates.is_empty() {
+            LiveSearchStatus::NoResults
+        } else {
+            LiveSearchStatus::Ready
+        };
+        self.candidates = candidates;
+    }
+
+    fn selected_candidate(&self) -> Option<TmdbSearchCandidate> {
+        let query = self.trimmed_query();
+        if self.searched_query.as_deref() != Some(query.as_str()) {
+            return None;
+        }
+        self.candidates.get(self.selected_result).cloned()
+    }
 }
 
 impl MediaExplorer {
@@ -296,6 +408,129 @@ impl TerminalUi {
                 "No items match that filter. Try again.",
             )?;
         }
+    }
+
+    fn run_live_tmdb_search(
+        &mut self,
+        search: &mut dyn FnMut(&str) -> Result<Vec<TmdbSearchCandidate>, TmdbError>,
+    ) -> UiResult<Result<Option<TmdbSearchCandidate>, TmdbError>> {
+        let _raw_mode = RawModeGuard::enter().map_err(UiError::Prompt)?;
+        self.terminal.hide_cursor().map_err(UiError::Prompt)?;
+
+        let mut rendered_lines = 0;
+        let interaction = self.run_live_tmdb_search_loop(search, &mut rendered_lines);
+        let clear_result = self.clear_rendered_lines(&mut rendered_lines);
+        let show_cursor_result = self.terminal.show_cursor().map_err(UiError::Prompt);
+
+        show_cursor_result?;
+        clear_result?;
+        interaction
+    }
+
+    fn run_live_tmdb_search_loop(
+        &mut self,
+        search: &mut dyn FnMut(&str) -> Result<Vec<TmdbSearchCandidate>, TmdbError>,
+        rendered_lines: &mut usize,
+    ) -> UiResult<Result<Option<TmdbSearchCandidate>, TmdbError>> {
+        let mut state = LiveSearchState::default();
+
+        loop {
+            if state.search_is_due() {
+                state.begin_search();
+                self.render_live_tmdb_search(&state, rendered_lines)?;
+                let query = state.trimmed_query();
+                match search(&query) {
+                    Ok(candidates) => state.complete_search(query, candidates),
+                    Err(error) => return Ok(Err(error)),
+                }
+                continue;
+            }
+
+            self.render_live_tmdb_search(&state, rendered_lines)?;
+            if !event::poll(state.search_wait()).map_err(UiError::Prompt)? {
+                continue;
+            }
+
+            let Event::Key(key) = event::read().map_err(UiError::Prompt)? else {
+                continue;
+            };
+            match apply_live_search_key(&mut state, key) {
+                LiveSearchAction::Continue => {}
+                LiveSearchAction::Cancel => return Ok(Ok(None)),
+                LiveSearchAction::Accept => return Ok(Ok(state.selected_candidate())),
+            }
+        }
+    }
+
+    fn render_live_tmdb_search(
+        &self,
+        state: &LiveSearchState,
+        rendered_lines: &mut usize,
+    ) -> UiResult<()> {
+        self.clear_rendered_lines(rendered_lines)?;
+
+        let terminal_height = usize::from(self.terminal.size().0);
+        let terminal_width = usize::from(self.terminal.size().1).max(40);
+        let query = terminal_text(&state.query());
+        let query = truncate_terminal_text_end(&query, terminal_width.saturating_sub(10).max(12));
+        let mut lines = vec![
+            format!(
+                "{} {}",
+                dialoguer::console::style("TMDB live search").cyan().bold(),
+                dialoguer::console::style("Search movies and TV series as you type").dim()
+            ),
+            format!("  Query: {query}"),
+            format!("  {}", live_search_status_message(state)),
+        ];
+
+        if !state.candidates.is_empty() {
+            let result_capacity = terminal_height
+                .saturating_sub(lines.len() + TMDB_LIVE_SEARCH_RESERVED_LINES)
+                .max(3);
+            let start = state
+                .selected_result
+                .saturating_sub(result_capacity / 2)
+                .min(state.candidates.len().saturating_sub(result_capacity));
+            let end = (start + result_capacity).min(state.candidates.len());
+            let label_width = terminal_width.saturating_sub(6).max(20);
+
+            lines.push(format!(
+                "  Results: {} · ↑/↓ choose · Enter select",
+                state.candidates.len()
+            ));
+            for (index, candidate) in state
+                .candidates
+                .iter()
+                .enumerate()
+                .skip(start)
+                .take(end - start)
+            {
+                let marker = if index == state.selected_result {
+                    dialoguer::console::style("›").cyan().bold().to_string()
+                } else {
+                    " ".to_owned()
+                };
+                let label =
+                    truncate_terminal_text_end(&format_tmdb_candidate(candidate), label_width);
+                lines.push(format!("  {marker} {label}"));
+            }
+            if start > 0 || end < state.candidates.len() {
+                lines.push(format!(
+                    "  Showing {}-{} of {} results",
+                    start + 1,
+                    end,
+                    state.candidates.len()
+                ));
+            }
+        }
+
+        lines.push("  Type to search · ↑/↓ choose · Enter select · Esc cancel".to_owned());
+        self.terminal
+            .write_str(&raw_terminal_frame(&lines))
+            .map_err(UiError::Prompt)?;
+        self.terminal.flush().map_err(UiError::Prompt)?;
+        *rendered_lines = lines.len();
+        Ok(())
     }
 
     fn run_media_explorer(
@@ -890,44 +1125,11 @@ impl TmdbInteraction for TerminalUi {
         }
     }
 
-    fn ask_search_query(&mut self) -> UiResult<Option<String>> {
-        self.ask_text("Search TMDB by title", None)
-    }
-
-    fn select_tmdb_result(
+    fn select_tmdb_result_live(
         &mut self,
-        candidates: &[TmdbSearchCandidate],
-    ) -> UiResult<Option<usize>> {
-        if candidates.is_empty() {
-            return Err(UiError::EmptySelection {
-                context: "TMDB result",
-            });
-        }
-
-        let items: Vec<String> = candidates
-            .iter()
-            .map(|candidate| {
-                let year = candidate
-                    .year
-                    .map(|year| format!(" ({year})"))
-                    .unwrap_or_default();
-                format!(
-                    "[{}] {} {}{}",
-                    candidate.media_type,
-                    candidate.id,
-                    terminal_text(&candidate.title),
-                    year
-                )
-            })
-            .collect();
-        let selection = self.select_one("Select a TMDB result", &items, true)?;
-        match selection {
-            None => Ok(None),
-            Some(index) if index < candidates.len() => Ok(Some(index)),
-            Some(_) => Err(UiError::InvalidSelection {
-                context: "TMDB result",
-            }),
-        }
+        search: &mut dyn FnMut(&str) -> Result<Vec<TmdbSearchCandidate>, TmdbError>,
+    ) -> UiResult<Result<Option<TmdbSearchCandidate>, TmdbError>> {
+        self.run_live_tmdb_search(search)
     }
 
     fn ask_tmdb_id(&mut self) -> UiResult<Option<String>> {
@@ -1025,6 +1227,159 @@ fn filter_item_indices(items: &[String], query: &str) -> Vec<usize> {
         .collect()
 }
 
+fn apply_live_search_key(state: &mut LiveSearchState, key: KeyEvent) -> LiveSearchAction {
+    if key.kind == KeyEventKind::Release {
+        return LiveSearchAction::Continue;
+    }
+
+    let control = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Esc => LiveSearchAction::Cancel,
+        KeyCode::Char(character) if control && character.eq_ignore_ascii_case(&'c') => {
+            LiveSearchAction::Cancel
+        }
+        KeyCode::Enter => {
+            if state.selected_candidate().is_some() {
+                LiveSearchAction::Accept
+            } else {
+                LiveSearchAction::Continue
+            }
+        }
+        KeyCode::Up => {
+            if !state.candidates.is_empty() {
+                state.selected_result = if state.selected_result == 0 {
+                    state.candidates.len() - 1
+                } else {
+                    state.selected_result - 1
+                };
+            }
+            LiveSearchAction::Continue
+        }
+        KeyCode::Down => {
+            if !state.candidates.is_empty() {
+                state.selected_result = (state.selected_result + 1) % state.candidates.len();
+            }
+            LiveSearchAction::Continue
+        }
+        KeyCode::PageUp => {
+            if !state.candidates.is_empty() {
+                state.selected_result = state.selected_result.saturating_sub(5);
+            }
+            LiveSearchAction::Continue
+        }
+        KeyCode::PageDown => {
+            if !state.candidates.is_empty() {
+                state.selected_result =
+                    (state.selected_result + 5).min(state.candidates.len().saturating_sub(1));
+            }
+            LiveSearchAction::Continue
+        }
+        KeyCode::Left => {
+            state.cursor = state.cursor.saturating_sub(1);
+            LiveSearchAction::Continue
+        }
+        KeyCode::Right => {
+            state.cursor = (state.cursor + 1).min(state.query.len());
+            LiveSearchAction::Continue
+        }
+        KeyCode::Home => {
+            state.cursor = 0;
+            LiveSearchAction::Continue
+        }
+        KeyCode::End => {
+            state.cursor = state.query.len();
+            LiveSearchAction::Continue
+        }
+        KeyCode::Backspace => {
+            if state.cursor > 0 {
+                state.query.remove(state.cursor - 1);
+                state.cursor -= 1;
+                state.query_changed();
+            }
+            LiveSearchAction::Continue
+        }
+        KeyCode::Delete => {
+            if state.cursor < state.query.len() {
+                state.query.remove(state.cursor);
+                state.query_changed();
+            }
+            LiveSearchAction::Continue
+        }
+        KeyCode::Char('u') if control => {
+            if !state.query.is_empty() {
+                state.query.clear();
+                state.cursor = 0;
+                state.query_changed();
+            }
+            LiveSearchAction::Continue
+        }
+        KeyCode::Char('w') if control => {
+            let original_cursor = state.cursor;
+            while state.cursor > 0 && state.query[state.cursor - 1].is_whitespace() {
+                state.query.remove(state.cursor - 1);
+                state.cursor -= 1;
+            }
+            while state.cursor > 0 && !state.query[state.cursor - 1].is_whitespace() {
+                state.query.remove(state.cursor - 1);
+                state.cursor -= 1;
+            }
+            if original_cursor != state.cursor {
+                state.query_changed();
+            }
+            LiveSearchAction::Continue
+        }
+        KeyCode::Char(character)
+            if !character.is_control()
+                && !key.modifiers.intersects(
+                    KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER,
+                ) =>
+        {
+            state.query.insert(state.cursor, character);
+            state.cursor += 1;
+            state.query_changed();
+            LiveSearchAction::Continue
+        }
+        _ => LiveSearchAction::Continue,
+    }
+}
+
+fn live_search_status_message(state: &LiveSearchState) -> String {
+    match state.status {
+        LiveSearchStatus::Empty => "Type a title to start searching.".to_owned(),
+        LiveSearchStatus::TooShort => {
+            format!("Type at least {TMDB_LIVE_SEARCH_MIN_QUERY_CHARS} characters to search.")
+        }
+        LiveSearchStatus::Waiting => "Waiting briefly before searching TMDB...".to_owned(),
+        LiveSearchStatus::Searching => "Searching TMDB...".to_owned(),
+        LiveSearchStatus::Ready => {
+            format!("{} result(s) found.", state.candidates.len())
+        }
+        LiveSearchStatus::NoResults => {
+            "No movies or TV series found. Keep typing to refine the search.".to_owned()
+        }
+    }
+}
+
+fn format_tmdb_candidate(candidate: &TmdbSearchCandidate) -> String {
+    let year = candidate
+        .year
+        .map(|year| format!(" ({year})"))
+        .unwrap_or_default();
+    format!(
+        "[{}] {} {}{}",
+        candidate.media_type,
+        candidate.id,
+        terminal_text(&candidate.title),
+        year
+    )
+}
+
+fn raw_terminal_frame(lines: &[String]) -> String {
+    let mut frame = lines.join("\r\n");
+    frame.push_str("\r\n");
+    frame
+}
+
 fn terminal_text(value: &str) -> String {
     value
         .chars()
@@ -1055,6 +1410,23 @@ fn truncate_terminal_text(value: &str, max_chars: usize) -> String {
         .iter()
         .collect();
     format!("…{suffix}")
+}
+
+fn truncate_terminal_text_end(value: &str, max_chars: usize) -> String {
+    let characters: Vec<char> = value.chars().collect();
+    if characters.len() <= max_chars {
+        return value.to_owned();
+    }
+    if max_chars == 0 {
+        return String::new();
+    }
+    if max_chars == 1 {
+        return "…".to_owned();
+    }
+
+    let prefix_length = max_chars - 1;
+    let prefix: String = characters[..prefix_length].iter().collect();
+    format!("{prefix}…")
 }
 
 #[cfg(test)]
@@ -1119,9 +1491,73 @@ mod tests {
             truncate_terminal_text("a very long path/episode.mkv", 12),
             "…episode.mkv"
         );
+        assert_eq!(
+            truncate_terminal_text_end("a very long title", 8),
+            "a very …"
+        );
         assert_eq!(truncate_terminal_text("áéíóú", 4), "…íóú");
+        assert_eq!(truncate_terminal_text_end("áéíóú", 4), "áéí…");
         assert_eq!(truncate_terminal_text("anything", 0), "");
         assert_eq!(truncate_terminal_text("anything", 1), "…");
+    }
+
+    #[test]
+    fn raw_terminal_frames_return_to_column_zero_for_each_line() {
+        let lines = vec!["Header".to_owned(), "Query: bat".to_owned()];
+
+        assert_eq!(raw_terminal_frame(&lines), "Header\r\nQuery: bat\r\n");
+    }
+
+    #[test]
+    fn live_search_state_invalidates_old_results_when_the_query_changes() {
+        let mut state = LiveSearchState::default();
+        for character in "bat".chars() {
+            assert_eq!(
+                apply_live_search_key(
+                    &mut state,
+                    KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+                ),
+                LiveSearchAction::Continue
+            );
+        }
+
+        let first = TmdbSearchCandidate {
+            id: crate::domain::TmdbId::new(550).unwrap(),
+            media_type: MediaType::Movie,
+            title: "Fight Club".to_owned(),
+            original_title: Some("Fight Club".to_owned()),
+            year: Some(1999),
+        };
+        let second = TmdbSearchCandidate {
+            id: crate::domain::TmdbId::new(414_906).unwrap(),
+            media_type: MediaType::Movie,
+            title: "The Batman".to_owned(),
+            original_title: Some("The Batman".to_owned()),
+            year: Some(2022),
+        };
+        state.complete_search("bat".to_owned(), vec![first, second]);
+
+        assert!(state.selected_candidate().is_some());
+        assert_eq!(
+            apply_live_search_key(&mut state, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            LiveSearchAction::Continue
+        );
+        assert_eq!(
+            apply_live_search_key(
+                &mut state,
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+            ),
+            LiveSearchAction::Accept
+        );
+
+        apply_live_search_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE),
+        );
+        assert_eq!(state.query(), "batm");
+        assert!(state.candidates.is_empty());
+        assert!(state.selected_candidate().is_none());
+        assert_eq!(state.status, LiveSearchStatus::Waiting);
     }
 
     #[test]

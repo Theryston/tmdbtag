@@ -713,23 +713,11 @@ where
     C: TmdbProvider,
 {
     loop {
-        let Some(query) = ui.ask_search_query()? else {
-            return Ok(None);
-        };
-        let query = query.trim().to_owned();
-        if query.is_empty() {
-            ui.show_message(
-                MessageLevel::Error,
-                "The TMDB search query cannot be empty.",
-            )?;
-            continue;
-        }
-
-        let activity = ui.start_activity("Searching TMDB movies and TV series...")?;
-        let movie_results = match client.search_movies(&query) {
-            Ok(results) => results,
+        let search_result = ui.select_tmdb_result_live(&mut |query| search_tmdb(client, query))?;
+        let candidate = match search_result {
+            Ok(Some(candidate)) => candidate,
+            Ok(None) => return Ok(None),
             Err(error) => {
-                activity.finish_error("TMDB search failed.");
                 let Some(should_retry) = retry_after_tmdb_error(ui, error)? else {
                     return Ok(None);
                 };
@@ -738,38 +726,6 @@ where
                 }
                 return Ok(None);
             }
-        };
-        let series_results = match client.search_series(&query) {
-            Ok(results) => results,
-            Err(error) => {
-                activity.finish_error("TMDB search failed.");
-                let Some(should_retry) = retry_after_tmdb_error(ui, error)? else {
-                    return Ok(None);
-                };
-                if should_retry {
-                    continue;
-                }
-                return Ok(None);
-            }
-        };
-        activity.finish_success("TMDB search completed.");
-
-        let candidates = combine_candidates(movie_results, series_results);
-        if candidates.is_empty() {
-            ui.show_message(
-                MessageLevel::Warning,
-                "TMDB returned no movies or TV series for that search.",
-            )?;
-            continue;
-        }
-
-        let Some(index) = ui.select_tmdb_result(&candidates)? else {
-            return Ok(None);
-        };
-        let Some(candidate) = candidates.get(index) else {
-            return Err(AppError::Ui(UiError::InvalidSelection {
-                context: "TMDB result",
-            }));
         };
 
         let activity = ui.start_activity("Fetching confirmed TMDB details...")?;
@@ -796,6 +752,15 @@ where
             None => return Ok(None),
         }
     }
+}
+
+fn search_tmdb<C: TmdbProvider>(
+    client: &C,
+    query: &str,
+) -> Result<Vec<TmdbSearchCandidate>, TmdbError> {
+    let movie_results = client.search_movies(query)?;
+    let series_results = client.search_series(query)?;
+    Ok(combine_candidates(movie_results, series_results))
 }
 
 fn identify_by_manual_id<U, C>(ui: &mut U, client: &C) -> AppResult<Option<TmdbItem>>
@@ -1035,23 +1000,32 @@ mod tests {
             })
         }
 
-        fn ask_search_query(&mut self) -> UiResult<Option<String>> {
-            Ok(if self.search_queries.is_empty() {
+        fn select_tmdb_result_live(
+            &mut self,
+            search: &mut dyn FnMut(
+                &str,
+            )
+                -> Result<Vec<crate::domain::TmdbSearchCandidate>, TmdbError>,
+        ) -> UiResult<Result<Option<crate::domain::TmdbSearchCandidate>, TmdbError>> {
+            let Some(query) = (if self.search_queries.is_empty() {
                 None
             } else {
                 self.search_queries.remove(0)
-            })
-        }
-
-        fn select_tmdb_result(
-            &mut self,
-            _candidates: &[crate::domain::TmdbSearchCandidate],
-        ) -> UiResult<Option<usize>> {
-            Ok(if self.tmdb_result_indices.is_empty() {
+            }) else {
+                return Ok(Ok(None));
+            };
+            let candidates = match search(query.trim()) {
+                Ok(candidates) => candidates,
+                Err(error) => return Ok(Err(error)),
+            };
+            let Some(index) = (if self.tmdb_result_indices.is_empty() {
                 None
             } else {
                 self.tmdb_result_indices.remove(0)
-            })
+            }) else {
+                return Ok(Ok(None));
+            };
+            Ok(Ok(candidates.get(index).cloned()))
         }
 
         fn ask_tmdb_id(&mut self) -> UiResult<Option<String>> {
@@ -1095,12 +1069,12 @@ mod tests {
     }
 
     impl TmdbProvider for FakeTmdbProvider {
-        fn search_movies(&self, _query: &str) -> Result<Vec<TmdbSearchCandidate>, TmdbError> {
-            Ok(Vec::new())
+        fn search_movies(&self, query: &str) -> Result<Vec<TmdbSearchCandidate>, TmdbError> {
+            Ok(search_fake_items(self, query, MediaType::Movie))
         }
 
-        fn search_series(&self, _query: &str) -> Result<Vec<TmdbSearchCandidate>, TmdbError> {
-            Ok(Vec::new())
+        fn search_series(&self, query: &str) -> Result<Vec<TmdbSearchCandidate>, TmdbError> {
+            Ok(search_fake_items(self, query, MediaType::Series))
         }
 
         fn get_item(&self, media_type: MediaType, id: TmdbId) -> Result<TmdbItem, TmdbError> {
@@ -1132,6 +1106,28 @@ mod tests {
                 })
             }
         }
+    }
+
+    fn search_fake_items(
+        client: &FakeTmdbProvider,
+        query: &str,
+        media_type: MediaType,
+    ) -> Vec<TmdbSearchCandidate> {
+        let query = query.to_lowercase();
+        client
+            .items
+            .iter()
+            .filter(|item| {
+                item.media_type == media_type && item.title.to_lowercase().contains(&query)
+            })
+            .map(|item| TmdbSearchCandidate {
+                id: item.id,
+                media_type: item.media_type,
+                title: item.title.clone(),
+                original_title: item.original_title.clone(),
+                year: item.year,
+            })
+            .collect()
     }
 
     fn run_default_for_test(ui: &mut RecordingUi, store: &ConfigStore) -> AppResult<RunOutcome> {
@@ -1211,6 +1207,27 @@ mod tests {
             confirm_responses: vec![final_confirmation],
             ..RecordingUi::default()
         }
+    }
+
+    #[test]
+    fn search_identification_uses_the_live_search_callback_before_fetching_details() {
+        let client = FakeTmdbProvider {
+            items: vec![movie_item(550, "Fight Club")],
+            ..FakeTmdbProvider::default()
+        };
+        let mut ui = RecordingUi {
+            identification_methods: vec![Some(IdentificationMethod::Search)],
+            search_queries: vec![Some("fight".to_owned())],
+            tmdb_result_indices: vec![Some(0)],
+            tmdb_confirmations: vec![Some(true)],
+            ..RecordingUi::default()
+        };
+
+        let item = identify_tmdb_item(&mut ui, &client).unwrap().unwrap();
+
+        assert_eq!(item.id, TmdbId::new(550).unwrap());
+        assert_eq!(item.media_type, MediaType::Movie);
+        assert_eq!(item.title, "Fight Club");
     }
 
     #[test]
