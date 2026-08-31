@@ -1278,11 +1278,12 @@ mod tests {
         assert!(!first_file.exists());
         assert!(!second_file.exists());
         assert_eq!(
-            fs::read_to_string(destination.join("550 - Fight Club.mkv")).unwrap(),
+            fs::read_to_string(destination.join("550__TMDB__MOVIE__TMDB__Fight Club.mkv")).unwrap(),
             "first movie"
         );
         assert_eq!(
-            fs::read_to_string(destination.join("680 - Pulp Fiction.mp4")).unwrap(),
+            fs::read_to_string(destination.join("680__TMDB__MOVIE__TMDB__Pulp Fiction.mp4"))
+                .unwrap(),
             "second movie"
         );
         assert!(ui.events.iter().any(|event| event == "preview:2"));
@@ -1319,7 +1320,10 @@ mod tests {
         assert_eq!(outcome, RunOutcome::Completed);
         assert!(!source_file.exists());
         assert_eq!(
-            fs::read_to_string(destination.join("550 - Mission - Impossible.mp4")).unwrap(),
+            fs::read_to_string(
+                destination.join("550__TMDB__MOVIE__TMDB__Mission - Impossible.mp4"),
+            )
+            .unwrap(),
             "movie contents"
         );
         assert!(ui.events.iter().any(|event| event == "preview:1"));
@@ -1374,11 +1378,19 @@ mod tests {
         assert!(!first_file.exists());
         assert!(!second_file.exists());
         assert_eq!(
-            fs::read_to_string(destination.join("1399 - S01E01 - Game - Of Thrones.mkv")).unwrap(),
+            fs::read_to_string(
+                destination
+                    .join("1399__TMDB__SERIES__TMDB__S01__TMDB__E01__TMDB__Game - Of Thrones.mkv",),
+            )
+            .unwrap(),
             "episode one"
         );
         assert_eq!(
-            fs::read_to_string(destination.join("1399 - S01E02 - Game - Of Thrones.mp4")).unwrap(),
+            fs::read_to_string(
+                destination
+                    .join("1399__TMDB__SERIES__TMDB__S01__TMDB__E02__TMDB__Game - Of Thrones.mp4",),
+            )
+            .unwrap(),
             "episode two"
         );
         assert!(ui.events.iter().any(|event| event == "preview:2"));
@@ -1432,11 +1444,12 @@ mod tests {
         assert!(!first_file.exists());
         assert!(!second_file.exists());
         assert_eq!(
-            fs::read_to_string(destination.join("550 - Fight Club.mkv")).unwrap(),
+            fs::read_to_string(destination.join("550__TMDB__MOVIE__TMDB__Fight Club.mkv")).unwrap(),
             "first"
         );
         assert_eq!(
-            fs::read_to_string(destination.join("680 - Pulp Fiction.mkv")).unwrap(),
+            fs::read_to_string(destination.join("680__TMDB__MOVIE__TMDB__Pulp Fiction.mkv"))
+                .unwrap(),
             "second"
         );
         assert!(ui.events.iter().any(|event| event == "preview:2"));
@@ -1558,7 +1571,7 @@ mod tests {
         let source_folder = directory.path().join("movies");
         let destination = directory.path().join("organized");
         let source_file = source_folder.join("movie.mkv");
-        let conflicting_file = destination.join("550 - Fight Club.mkv");
+        let conflicting_file = destination.join("550__TMDB__MOVIE__TMDB__Fight Club.mkv");
         fs::create_dir(&source_folder).unwrap();
         fs::create_dir(&destination).unwrap();
         fs::write(&source_file, "source").unwrap();

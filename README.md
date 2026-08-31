@@ -438,7 +438,8 @@ Season: 1
 Episode: 2
 ~~~
 
-The title used in the filename is the series title returned by TMDB, not the individual episode title. The series ID combined with SxxEyy identifies the episode.
+The title used in the filename is the series title returned by TMDB, not the individual episode title.
+The series ID, `S<season>` field, and `E<episode>` field identify the episode together.
 
 ### 8. Plan preview
 
@@ -448,9 +449,9 @@ Before moving any file, display every operation that will be performed:
 Destination: ../library/organized
 
 SOURCE                                      DESTINATION
-movies/Fight Club.mkv                       ../library/organized/550 - Fight Club.mkv
-series/season-01/episode-01.mp4             ../library/organized/1399 - S01E01 - Game of Thrones.mp4
-series/season-01/episode-02.mp4             ../library/organized/1399 - S01E02 - Game of Thrones.mp4
+movies/Fight Club.mkv                       ../library/organized/550__TMDB__MOVIE__TMDB__Fight Club.mkv
+series/season-01/episode-01.mp4             ../library/organized/1399__TMDB__SERIES__TMDB__S01__TMDB__E01__TMDB__Game of Thrones.mp4
+series/season-01/episode-02.mp4             ../library/organized/1399__TMDB__SERIES__TMDB__S01__TMDB__E02__TMDB__Game of Thrones.mp4
 ~~~
 
 The preview must show:
@@ -599,22 +600,33 @@ The CLI should feel fast even when the work is not instantaneous:
 
 ## Naming Convention
 
-The final filename must contain the TMDB ID and the title returned by the API after mandatory filename normalization. The final extension is the selected source video's extension, emitted in lowercase. The program must preserve the video's format and must never rename an `.mp4` source to `.mkv` merely as part of organization.
+The final filename must contain the TMDB ID, the media type, the series season and episode when
+applicable, and the title returned by the API after mandatory filename normalization. Every
+metadata field is separated by the reserved `__TMDB__` delimiter. The final extension is the
+selected source video's extension, emitted in lowercase. The program must preserve the video's
+format and must never rename an `.mp4` source to `.mkv` merely as part of organization.
+
+`__TMDB__` is a filename-safe field delimiter reserved exclusively for the generated naming
+contract. The normalized title must never contain this token, including any case variation, so a
+future metadata reader can recover the fields with a simple split.
 
 | Type | Format | Example |
 | --- | --- | --- |
-| Movie | &lt;id&gt; - &lt;normalized_title&gt;.&lt;video_extension&gt; | 550 - Fight Club.mkv |
-| Series | &lt;id&gt; - S&lt;season&gt;E&lt;episode&gt; - &lt;normalized_series_title&gt;.&lt;video_extension&gt; | 1399 - S01E01 - Game of Thrones.mp4 |
+| Movie | &lt;id&gt;__TMDB__MOVIE__TMDB__&lt;normalized_title&gt;.&lt;video_extension&gt; | 550__TMDB__MOVIE__TMDB__Fight Club.mkv |
+| Series | &lt;id&gt;__TMDB__SERIES__TMDB__S&lt;season&gt;__TMDB__E&lt;episode&gt;__TMDB__&lt;normalized_series_title&gt;.&lt;video_extension&gt; | 1399__TMDB__SERIES__TMDB__S01__TMDB__E01__TMDB__Game of Thrones.mp4 |
 
 ### Composition rules
 
 - use the numeric TMDB ID, without a tmdb prefix;
-- separate components with " - ";
+- use `__TMDB__` between every metadata field;
+- use the literal `MOVIE` or `SERIES` media-type segment;
+- for series, use separate `S<season>` and `E<episode>` segments;
+- reserve `__TMDB__` exclusively for field boundaries; it must not occur in the normalized title;
 - do not include the year, codec, resolution, language, release group, or original filename;
 - use the localized title returned by TMDB, after mandatory filename normalization;
 - if no localized title is available, use the original title returned by the API;
 - preserve accents and safe Unicode characters;
-- write the season and episode with at least two digits (S01E02, S10E03); larger numbers must not be truncated;
+- write the season and episode with at least two digits (`S01`, `E02`, `S10`, `E03`); larger numbers must not be truncated;
 - preserve the selected source video's extension and write it in lowercase;
 - do not include the episode title in the MVP;
 - do not include information that was not obtained from the confirmed TMDB item.
@@ -628,13 +640,14 @@ The normalization pipeline is:
 1. preserve the original TMDB title for display and metadata;
 2. trim leading and trailing Unicode whitespace;
 3. replace filesystem-invalid characters and control characters, including /, \, :, *, ?, ", <, >, and |, with a safe separator;
-4. use a readable separator such as " - " for replacements, so Mission: Impossible becomes Mission - Impossible;
-5. collapse accidental repeated spaces or replacement separators;
-6. remove trailing spaces, periods, and replacement separators;
-7. preserve accents and safe Unicode characters;
-8. avoid Windows-reserved filename components when Windows support is claimed;
-9. shorten only the title component if the operating system path limit requires it;
-10. reject the plan if normalization produces an empty title instead of inventing an unverified title.
+4. replace the reserved `__TMDB__` delimiter and its case variations with a safe separator;
+5. use a readable separator such as " - " for replacements, so Mission: Impossible becomes Mission - Impossible;
+6. collapse accidental repeated spaces or replacement separators;
+7. remove trailing spaces, periods, and replacement separators;
+8. preserve accents and safe Unicode characters;
+9. avoid Windows-reserved filename components when Windows support is claimed;
+10. shorten only the title component if the operating system path limit requires it;
+11. reject the plan if normalization produces an empty title instead of inventing an unverified title.
 
 Examples:
 
@@ -643,6 +656,7 @@ Mission: Impossible       -> Mission - Impossible
 Spider-Man: No Way Home   -> Spider-Man - No Way Home
 What?                     -> What
 Title / Director          -> Title - Director
+A__TMDB__B                -> A - B
 ~~~
 
 Normalization must be deterministic and idempotent:
@@ -844,9 +858,15 @@ it must still treat the title as a display hint rather than authoritative metada
 The parser recognizes:
 
 ~~~text
-Movie:   ^(?<id>[0-9]+) - (?<title>.+)\.(?<extension>[A-Za-z0-9-]+)$
-Series:  ^(?<id>[0-9]+) - S(?<season>[0-9]+)E(?<episode>[0-9]+) - (?<title>.+)\.(?<extension>[A-Za-z0-9-]+)$
+Movie:   ^(?<id>[0-9]+)__TMDB__MOVIE__TMDB__(?<title>.+)\.(?<extension>[A-Za-z0-9-]+)$
+Series:  ^(?<id>[0-9]+)__TMDB__SERIES__TMDB__S(?<season>[0-9]+)__TMDB__E(?<episode>[0-9]+)__TMDB__(?<title>.+)\.(?<extension>[A-Za-z0-9-]+)$
 ~~~
+
+The canonical parser first splits the filename stem on `__TMDB__` and then validates the expected
+field count and fixed media-type/season/episode markers. A movie produces three fields
+(`id`, `MOVIE`, `title`); a series produces five fields (`id`, `SERIES`, `S<season>`,
+`E<episode>`, `title`). The title field may contain ordinary hyphens, spaces, periods, or other
+safe characters, but never the reserved delimiter.
 
 The actual expression must treat the extension case-insensitively when reading external files,
 validate it against the supported video-extension policy, and normalize the generated extension to
@@ -872,7 +892,7 @@ Authority rules:
 - season and episode are the source of truth for an episode;
 - the title in the filename is a readable copy and may become outdated;
 - a future synchronization command must query TMDB again by ID, rather than trusting only the title text;
-- the type may be inferred from the presence of SxxEyy, but ID lookups must still validate the type through the API.
+- the type is read from the explicit `MOVIE` or `SERIES` field, but ID lookups must still validate the type through the API.
 
 ## Planned Architecture
 
@@ -1086,6 +1106,8 @@ The MVP is complete only when all of the following criteria are met:
 - [x] Display the type and title before using the data.
 - [x] Ask separately for season and episode for each series file.
 - [x] Generate exactly the documented filename pattern.
+- [x] Separate every recoverable metadata field with the reserved `__TMDB__` delimiter.
+- [x] Prevent the reserved delimiter, including case variations, from appearing in normalized titles.
 - [x] Normalize titles for filenames, including replacing invalid characters such as colon, without losing the ID, season, or episode.
 - [x] Detect collisions before execution.
 - [x] Never overwrite an existing destination.

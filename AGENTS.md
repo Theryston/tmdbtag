@@ -174,25 +174,28 @@ association for safe plan validation; it does not determine the metadata for eve
 Movie:
 
 ~~~text
-<tmdb_id> - <normalized_title>.<video_extension>
+<tmdb_id>__TMDB__MOVIE__TMDB__<normalized_title>.<video_extension>
 ~~~
 
 Series:
 
 ~~~text
-<tmdb_id> - S<season>E<episode> - <normalized_series_title>.<video_extension>
+<tmdb_id>__TMDB__SERIES__TMDB__S<season>__TMDB__E<episode>__TMDB__<normalized_series_title>.<video_extension>
 ~~~
 
 Examples:
 
 ~~~text
-550 - Fight Club.mkv
-1399 - S01E01 - Game of Thrones.mp4
+550__TMDB__MOVIE__TMDB__Fight Club.mkv
+1399__TMDB__SERIES__TMDB__S01__TMDB__E01__TMDB__Game of Thrones.mp4
 ~~~
 
 Naming rules:
 
 - use the numeric TMDB ID without a prefix;
+- use the literal `MOVIE` or `SERIES` media-type segment;
+- separate every metadata field with the reserved `__TMDB__` delimiter;
+- for series, use separate `S<season>` and `E<episode>` fields;
 - use the localized title returned by TMDB, after mandatory filename normalization, falling back to the original title only when needed;
 - preserve the selected source video's extension and emit it in lowercase for generated files;
 - use at least two digits for season and episode;
@@ -1309,13 +1312,14 @@ The normalization pipeline is:
 1. trim leading and trailing Unicode whitespace;
 2. remove control characters;
 3. replace filesystem-invalid characters, including /, \, :, *, ?, ", <, >, and |, with a readable safe separator;
-4. use a readable replacement such as " - ", so Mission: Impossible becomes Mission - Impossible;
-5. collapse accidental repeated spaces and replacement separators;
-6. remove trailing spaces, periods, and replacement separators;
-7. preserve accents and safe Unicode characters;
-8. avoid Windows-reserved filename components when Windows support is claimed;
-9. shorten only the title component if the operating system path limit requires it;
-10. reject the plan if normalization produces an empty title instead of inventing an unverified title.
+4. replace the reserved `__TMDB__` delimiter and its case variations with a readable safe separator;
+5. use a readable replacement such as " - ", so Mission: Impossible becomes Mission - Impossible;
+6. collapse accidental repeated spaces and replacement separators;
+7. remove trailing spaces, periods, and replacement separators;
+8. preserve accents and safe Unicode characters;
+9. avoid Windows-reserved filename components when Windows support is claimed;
+10. shorten only the title component if the operating system path limit requires it;
+11. reject the plan if normalization produces an empty title instead of inventing an unverified title.
 
 Examples:
 
@@ -1324,6 +1328,7 @@ Mission: Impossible       -> Mission - Impossible
 Spider-Man: No Way Home   -> Spider-Man - No Way Home
 What?                     -> What
 Title / Director          -> Title - Director
+A__TMDB__B                -> A - B
 ~~~
 
 Normalization must be deterministic and idempotent:
@@ -1333,7 +1338,9 @@ normalize_title_for_filename(normalize_title_for_filename(title))
     == normalize_title_for_filename(title)
 ~~~
 
-The normalized title must never contain a path separator or escape the destination folder. It must not remove the fixed ID or SxxEyy prefix, because those components are assembled outside the title-normalization function.
+The normalized title must never contain a path separator, the reserved `__TMDB__` delimiter, or
+content that can escape the destination folder. The ID, media type, season, and episode fields are
+assembled outside the title-normalization function.
 
 ### Parsing
 
@@ -1342,9 +1349,14 @@ The parser must recognize only the generated contract, not arbitrary media filen
 Conceptual patterns:
 
 ~~~text
-Movie:   ^(?<id>[0-9]+) - (?<title>.+)\.(?<extension>[A-Za-z0-9-]+)$
-Series:  ^(?<id>[0-9]+) - S(?<season>[0-9]+)E(?<episode>[0-9]+) - (?<title>.+)\.(?<extension>[A-Za-z0-9-]+)$
+Movie:   ^(?<id>[0-9]+)__TMDB__MOVIE__TMDB__(?<title>.+)\.(?<extension>[A-Za-z0-9-]+)$
+Series:  ^(?<id>[0-9]+)__TMDB__SERIES__TMDB__S(?<season>[0-9]+)__TMDB__E(?<episode>[0-9]+)__TMDB__(?<title>.+)\.(?<extension>[A-Za-z0-9-]+)$
 ~~~
+
+The implementation should split the filename stem on `__TMDB__`, validate the fixed field count,
+and then parse the typed fields. Movie names contain `id`, `MOVIE`, and `title`; series names
+contain `id`, `SERIES`, `S<season>`, `E<episode>`, and `title`. The delimiter is reserved for these
+boundaries and must never be accepted inside the normalized title.
 
 The actual parser should:
 
@@ -1355,7 +1367,7 @@ The actual parser should:
 - accept only canonical positive decimal TMDB IDs without leading zeroes;
 - distinguish movie and series forms;
 - reject empty titles;
-- reject incomplete or malformed SxxEyy markers instead of reclassifying them as movies;
+- reject incomplete or malformed `S<season>`/`E<episode>` fields;
 - reject path separators in the parsed title component;
 - return typed data rather than a map of strings;
 - preserve a title hint only as display data;
@@ -1370,7 +1382,7 @@ For valid domain inputs:
 - parsed media types must equal the original types;
 - parsed seasons and episodes must equal the original values;
 - the generated extension must be lowercase;
-- invalid or ambiguous names must be rejected.
+- invalid names must be rejected.
 
 Do not promise that arbitrary old filenames can be parsed unless the product specification explicitly adds backward compatibility.
 

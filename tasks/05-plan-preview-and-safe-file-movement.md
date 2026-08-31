@@ -106,8 +106,8 @@ Example:
 Destination: ../library/organized
 
 SOURCE                                      DESTINATION
-movies/Fight Club.mkv                       ../library/organized/550 - Fight Club.mkv
-series/season-01/episode-01.mp4             ../library/organized/1399 - S01E01 - Game of Thrones.mp4
+movies/Fight Club.mkv                       ../library/organized/550__TMDB__MOVIE__TMDB__Fight Club.mkv
+series/season-01/episode-01.mp4             ../library/organized/1399__TMDB__SERIES__TMDB__S01__TMDB__E01__TMDB__Game of Thrones.mp4
 
 Move and rename 2 files? [y/N]
 ```

@@ -1529,7 +1529,7 @@ mod tests {
         let source_folder = directory.path().join("source");
         let destination = directory.path().join("organized");
         let source = source_folder.join("movie.MKV");
-        let final_name = "550 - Fight Club.mkv";
+        let final_name = "550__TMDB__MOVIE__TMDB__Fight Club.mkv";
         fs::create_dir(&source_folder).unwrap();
         fs::create_dir(&destination).unwrap();
         fs::write(&source, "video bytes").unwrap();
@@ -1562,7 +1562,7 @@ mod tests {
         let source_folder = directory.path().join("source");
         let destination = directory.path().join("organized");
         let source = source_folder.join("movie.mkv");
-        let final_name = "550 - Fight Club.mkv";
+        let final_name = "550__TMDB__MOVIE__TMDB__Fight Club.mkv";
         let conflicting_destination = destination.join(final_name);
         fs::create_dir(&source_folder).unwrap();
         fs::create_dir(&destination).unwrap();
@@ -1600,7 +1600,7 @@ mod tests {
         let source_folder = directory.path().join("source");
         let destination = directory.path().join("new-organized");
         let source = source_folder.join("movie.mp4");
-        let final_name = "550 - Fight Club.mp4";
+        let final_name = "550__TMDB__MOVIE__TMDB__Fight Club.mp4";
         fs::create_dir(&source_folder).unwrap();
         fs::write(&source, "source bytes").unwrap();
 
@@ -1648,7 +1648,7 @@ mod tests {
                 &source_folder,
                 &source,
                 &destination,
-                "550 - Fight Club.mkv",
+                "550__TMDB__MOVIE__TMDB__Fight Club.mkv",
             )],
         );
         fs::write(&source, "the source changed after selection").unwrap();
@@ -1671,7 +1671,7 @@ mod tests {
         fs::create_dir(&destination).unwrap();
         fs::write(&first_source, "first").unwrap();
         fs::write(&second_source, "second").unwrap();
-        let final_name = "550 - Same Title.mkv";
+        let final_name = "550__TMDB__MOVIE__TMDB__Same Title.mkv";
 
         let plan = operation_plan(
             directory.path(),
@@ -1699,7 +1699,7 @@ mod tests {
         let source_folder = directory.path().join("source");
         let destination = directory.path().join("organized");
         let source = source_folder.join("movie.webm");
-        let final_name = "550 - Fight Club.webm";
+        let final_name = "550__TMDB__MOVIE__TMDB__Fight Club.webm";
         fs::create_dir(&source_folder).unwrap();
         fs::create_dir(&destination).unwrap();
         fs::write(&source, "cross volume video bytes").unwrap();
@@ -1734,7 +1734,7 @@ mod tests {
         let source_folder = directory.path().join("source");
         let destination = directory.path().join("organized");
         let source = source_folder.join("movie.mkv");
-        let final_name = "550 - Fight Club.mkv";
+        let final_name = "550__TMDB__MOVIE__TMDB__Fight Club.mkv";
         fs::create_dir(&source_folder).unwrap();
         fs::create_dir(&destination).unwrap();
         fs::write(&source, "video bytes").unwrap();
@@ -1770,7 +1770,11 @@ mod tests {
             source_folder.join("second.mkv"),
             source_folder.join("third.mkv"),
         ];
-        let names = ["550 - First.mkv", "550 - Second.mkv", "550 - Third.mkv"];
+        let names = [
+            "550__TMDB__MOVIE__TMDB__First.mkv",
+            "550__TMDB__MOVIE__TMDB__Second.mkv",
+            "550__TMDB__MOVIE__TMDB__Third.mkv",
+        ];
         fs::create_dir(&source_folder).unwrap();
         fs::create_dir(&destination).unwrap();
         for (source, content) in sources.iter().zip(["first", "second", "third"]) {

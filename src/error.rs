@@ -213,9 +213,6 @@ pub enum NamingError {
         /// A safe representation of the unsupported extension.
         extension: String,
     },
-    /// A movie title would be indistinguishable from the series filename prefix.
-    #[error("The movie title is ambiguous with the series filename pattern.")]
-    AmbiguousMovieTitle,
     /// A parsed filename violates the generated filename contract.
     #[error("The generated filename is invalid: {reason}.")]
     InvalidGeneratedFilename {
