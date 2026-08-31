@@ -1,4 +1,4 @@
-use std::{fmt, str::FromStr};
+use std::{fmt, path::PathBuf, str::FromStr};
 
 use thiserror::Error;
 
@@ -92,6 +92,163 @@ impl EpisodeRef {
     /// Returns the episode number.
     pub const fn episode(self) -> u32 {
         self.episode
+    }
+}
+
+/// The absolute directory from which the process was started and where source folders are found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceRoot {
+    path: PathBuf,
+}
+
+impl SourceRoot {
+    /// Creates a source-root value. Filesystem validation is performed by the filesystem layer.
+    pub fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    /// Returns the exact source-root path.
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+/// A direct child directory that can be selected as a source folder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceFolder {
+    path: PathBuf,
+}
+
+impl SourceFolder {
+    /// Creates a source-folder value. Discovery is responsible for proving that it is a real
+    /// directory rather than a symbolic link.
+    pub fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    /// Returns the exact source-folder path.
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+/// A regular video file discovered inside one source folder or one of its real subdirectories.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VideoFile {
+    path: PathBuf,
+    size_bytes: Option<u64>,
+}
+
+impl VideoFile {
+    /// Creates a video-file value while retaining an optional display-only size.
+    pub fn new(path: PathBuf, size_bytes: Option<u64>) -> Self {
+        Self { path, size_bytes }
+    }
+
+    /// Returns the exact path that must be revalidated before a later move.
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    /// Returns the size observed during discovery, when metadata was available.
+    pub const fn size_bytes(&self) -> Option<u64> {
+        self.size_bytes
+    }
+}
+
+/// A validated destination path. A missing destination is retained without being created.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DestinationSelection {
+    path: PathBuf,
+    exists: bool,
+    may_create_after_confirmation: bool,
+}
+
+impl DestinationSelection {
+    /// Creates a destination value after filesystem-layer validation.
+    pub fn new(path: PathBuf, exists: bool, may_create_after_confirmation: bool) -> Self {
+        Self {
+            path,
+            exists,
+            may_create_after_confirmation,
+        }
+    }
+
+    /// Returns the normalized destination path.
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    /// Returns whether the destination already existed during discovery.
+    pub const fn exists(&self) -> bool {
+        self.exists
+    }
+
+    /// Returns whether creation is permitted later, after the final plan confirmation.
+    pub const fn may_create_after_confirmation(&self) -> bool {
+        self.may_create_after_confirmation
+    }
+}
+
+/// The selected files associated with one source folder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectedSource {
+    folder: PathBuf,
+    files: Vec<PathBuf>,
+}
+
+impl SelectedSource {
+    /// Creates a selection while retaining exact paths instead of display labels.
+    pub fn new(folder: PathBuf, files: Vec<PathBuf>) -> Self {
+        Self { folder, files }
+    }
+
+    /// Returns the exact selected source-folder path.
+    pub fn folder(&self) -> &std::path::Path {
+        &self.folder
+    }
+
+    /// Returns the exact selected file paths in deterministic UI order.
+    pub fn files(&self) -> &[PathBuf] {
+        &self.files
+    }
+}
+
+/// The complete non-mutating filesystem selection returned by Task 03.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilesystemSelection {
+    source_root: SourceRoot,
+    destination: DestinationSelection,
+    sources: Vec<SelectedSource>,
+}
+
+impl FilesystemSelection {
+    /// Creates a selection for later metadata planning and near-commit revalidation.
+    pub fn new(
+        source_root: SourceRoot,
+        destination: DestinationSelection,
+        sources: Vec<SelectedSource>,
+    ) -> Self {
+        Self {
+            source_root,
+            destination,
+            sources,
+        }
+    }
+
+    /// Returns the source root used for discovery.
+    pub fn source_root(&self) -> &SourceRoot {
+        &self.source_root
+    }
+
+    /// Returns the validated destination selection.
+    pub fn destination(&self) -> &DestinationSelection {
+        &self.destination
+    }
+
+    /// Returns the selected source groups in deterministic order.
+    pub fn sources(&self) -> &[SelectedSource] {
+        &self.sources
     }
 }
 
@@ -190,6 +347,8 @@ pub enum RunOutcome {
     Cancelled,
     /// The CLI foundation completed its startup setup.
     StartupConfigured,
+    /// The startup configuration and non-mutating filesystem selection completed.
+    MediaSelectionReady,
     /// The saved TMDB configuration was intentionally updated by the `config` command.
     ConfigurationUpdated,
 }

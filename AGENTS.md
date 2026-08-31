@@ -58,18 +58,20 @@ title-tmdb-file/
     ├── domain.rs
     ├── error.rs
     ├── ui.rs
+    ├── filesystem.rs
     └── tmdb/
         ├── mod.rs
         ├── client.rs
         └── models.rs
 ~~~
 
-The remaining media-organization workflow is still a placeholder. Do not describe filesystem discovery, naming, planning, or movement as already available.
+The naming, planning, and movement portions of the media-organization workflow are still placeholders. Do not describe those capabilities as already available. Filesystem discovery and explicit media selection are implemented as the completed Task 03 boundary.
 
 The CLI foundation is now implemented: command parsing, interactive terminal contracts, per-user
 configuration persistence, the shared configuration wizard, local configuration validation, the
-reusable TMDB client, and the TMDB identification boundary are available. Filesystem discovery,
-naming, planning, and movement are still unimplemented until their respective tasks are completed.
+reusable TMDB client, the TMDB identification boundary, and the non-mutating filesystem discovery
+and media-selection boundary are available. Naming, planning, and movement are still unimplemented
+until their respective tasks are completed.
 
 The repository is a binary application, not a library product at this stage. Nevertheless, the core logic must be structured so it can be tested without driving a real terminal or contacting the real TMDB service.
 
@@ -121,19 +123,25 @@ Rules:
 
 - Source folders are direct child directories of the current working directory.
 - The MVP does not recursively select nested source folders.
-- Video files are direct regular files inside the selected source folder.
-- The MVP recognizes the .mkv extension case-insensitively.
-- Nested folders are not searched automatically.
+- Video files are regular files discovered recursively inside each selected source folder and its
+  real subdirectories.
+- The MVP recognizes common video extensions through the centralized case-insensitive
+  `VIDEO_EXTENSIONS` allowlist; it is not limited to `.mkv`.
+- Nested directories are searched for video files, but are never themselves source-folder choices
+  and are never selected as files.
 - Symbolic links must not be followed in the MVP.
-- Discovery and display order must be deterministic.
+- Discovery and display order must be deterministic by relative path.
+- Filesystem paths shown by the interactive UI must be relative: source folders are relative to the
+  current source root, and video files are relative to their selected source folder. Exact paths
+  remain owned `PathBuf` values inside the application.
 - The user must explicitly select folders and files; the first item must never be selected silently.
 
 ### Unit of work
 
 Each source folder represents exactly one TMDB item.
 
-- A movie folder must have exactly one selected .mkv file.
-- A series folder may have one or more selected .mkv files.
+- A movie folder must have exactly one selected video file.
+- A series folder may have one or more selected video files.
 - For a series, each selected file receives its own season and episode numbers.
 - Multiple selected series files represent episodes of the same series.
 - Different movies or series in one source folder are outside the MVP and must not be guessed or merged.
@@ -156,27 +164,27 @@ Each source folder represents exactly one TMDB item.
 Movie:
 
 ~~~text
-<tmdb_id> - <normalized_title>.mkv
+<tmdb_id> - <normalized_title>.<video_extension>
 ~~~
 
 Series:
 
 ~~~text
-<tmdb_id> - S<season>E<episode> - <normalized_series_title>.mkv
+<tmdb_id> - S<season>E<episode> - <normalized_series_title>.<video_extension>
 ~~~
 
 Examples:
 
 ~~~text
 550 - Fight Club.mkv
-1399 - S01E01 - Game of Thrones.mkv
+1399 - S01E01 - Game of Thrones.mp4
 ~~~
 
 Naming rules:
 
 - use the numeric TMDB ID without a prefix;
 - use the localized title returned by TMDB, after mandatory filename normalization, falling back to the original title only when needed;
-- use lowercase .mkv for generated files;
+- preserve the selected source video's extension and emit it in lowercase for generated files;
 - use at least two digits for season and episode;
 - do not add the year, codec, resolution, release group, or original filename;
 - do not include the individual episode title in the MVP;
@@ -399,7 +407,8 @@ Do not turn every error into a generic string at the first boundary. Preserve en
 - Use Path::join, Path::file_name, Path::extension, and related APIs.
 - Treat filenames as operating-system data, not necessarily valid UTF-8.
 - Use to_string_lossy only for display or diagnostics, never as the authoritative path representation.
-- Be careful with case sensitivity: a case-insensitive extension check is a product rule, while destination collision behavior depends on the host filesystem.
+- Be careful with case sensitivity: case-insensitive matching against the centralized video-extension
+  allowlist is a product rule, while destination collision behavior depends on the host filesystem.
 - Do not assume Unix path behavior if the project claims Windows support.
 - Do not assume that canonicalize succeeds for a destination that has not been created.
 - Preserve the original PathBuf in plans and use normalized or canonical paths only for comparisons and validation.
@@ -559,8 +568,6 @@ config.rs should contain configuration parsing and normalization.
 
 It should handle:
 
-- current working directory;
-- destination input normalization;
 - the standard per-user configuration path (`~/.title-tmdb-file/config.json`, with the platform's home-directory convention);
 - loading optional JSON fields so missing configuration can be detected;
 - writing a complete JSON configuration with safe file permissions;
@@ -568,6 +575,10 @@ It should handle:
 - the shared interactive API-key and language configuration flow;
 - TMDB language;
 - timeout and other explicitly supported settings.
+
+Current-directory resolution and destination-path normalization belong to `filesystem.rs`, not to
+the configuration store. This keeps persisted user preferences separate from paths that are
+selected for one execution.
 
 Configuration parsing should be separate from business validation. For example, reading the saved
 JSON file and a masked default from TMDB_API_KEY is configuration parsing; deciding whether a series
@@ -597,8 +608,12 @@ Expected concepts include:
 MediaType
 TmdbMedia
 EpisodeRef
+SourceRoot
 SourceFolder
 VideoFile
+DestinationSelection
+SelectedSource
+FilesystemSelection
 SelectedMedia
 MovePlanItem
 MovePlan
@@ -627,6 +642,8 @@ At minimum, distinguish:
 - current-directory access failure;
 - destination validation failure;
 - source discovery failure;
+- empty source or video selections;
+- deferred destination-creation state;
 - no eligible videos;
 - invalid user input;
 - TMDB authentication failure;
@@ -659,10 +676,15 @@ filesystem.rs owns filesystem interaction.
 
 It should provide focused operations such as:
 
+- resolve and validate the process current directory as a `SourceRoot`;
+- resolve absolute and current-directory-relative destinations without creating them;
 - discover direct source folders;
-- discover direct .mkv files;
+- recursively discover regular files with recognized video extensions inside a selected source folder;
+- skip symbolic links and report nested-directory discovery warnings without following links;
 - normalize and compare paths;
-- validate the destination;
+- exclude destinations and overlapping source paths;
+- return typed discovery values and non-fatal discovery warnings;
+- validate the selected folder/file association;
 - validate a plan;
 - execute a safe same-volume move;
 - execute a safe cross-volume move;
@@ -676,6 +698,11 @@ The filesystem layer should not:
 - infer seasons from filenames;
 - create arbitrary conflict suffixes;
 - invoke shell commands such as mv, cp, or powershell move commands.
+
+Task 03's discovery functions are read-only. They must not create the deferred destination or
+perform any rename, copy, delete, or move. The application layer may prompt for the destination
+and selections, but it must retain the exact `PathBuf` values returned by this adapter for later
+near-commit revalidation.
 
 Use Rust filesystem APIs directly. Shelling out creates quoting, platform, error-reporting, and security problems.
 
@@ -759,7 +786,8 @@ The following invariants must be enforced by code, not left as comments.
 ### Source selection
 
 - Every selected source path is a regular file.
-- Every selected source file has a case-insensitive .mkv extension.
+- Every selected source file has a case-insensitive extension in the centralized video-extension
+  allowlist.
 - Every selected source file belongs to one selected source folder.
 - No source file appears more than once in a plan.
 - A movie plan contains exactly one file.
@@ -935,7 +963,7 @@ For a normal interactive invocation, the exact high-level order is:
 7. the application obtains and validates the current working directory;
 8. the UI asks for the destination;
 9. the UI lists and selects source folders;
-10. the UI lists and selects direct .mkv files for each folder;
+10. the UI recursively lists and selects recognized video files for each folder;
 11. the UI identifies one movie or series per source folder;
 12. the UI collects season and episode per series file;
 13. the application builds and validates the complete plan;
@@ -985,6 +1013,12 @@ The exact trait shape is not prescribed. The separation is required:
 - workflow decisions belong to app.rs;
 - domain rules belong to domain modules;
 - filesystem mutation belongs to filesystem.rs.
+
+Filesystem paths shown by the interactive UI must be relative display values. Show source-folder
+choices relative to the current source root, show video-file choices relative to their selected
+source folder, and show preview source/destination values relative to the current source root.
+Relative labels are presentation-only; never reconstruct an execution path from them, and never
+discard the exact `PathBuf` retained by discovery and planning.
 
 ### Modern terminal quality bar
 
@@ -1050,6 +1084,9 @@ During execution:
 - Show the current destination while building the plan.
 - Show the media type clearly.
 - Show the full source-to-destination mapping in the preview.
+- Render filesystem paths as relative display paths: source folders relative to the source root,
+  nested video files relative to their selected source folder, and preview entries relative to the
+  source root. Keep exact paths in the plan for execution.
 - Do not communicate safety-critical information by color alone.
 - Keep paths readable; allow wrapping or scrolling for long paths.
 - Show a useful progress indicator for large files or batches.
@@ -1073,7 +1110,9 @@ For every discovered entry:
 - preserve the actual path for later revalidation;
 - sort before returning results.
 
-Do not use a broad recursive walk when the product contract says direct children only.
+Source-folder discovery is intentionally direct-child-only. Video-file discovery is a separate,
+intentional recursive walk inside each already selected source folder. Do not broaden the former
+while implementing the latter, and do not follow symbolic links in either walk.
 
 ### Path comparison
 
@@ -1098,7 +1137,8 @@ Plan construction should not mutate the filesystem.
 Plan validation should verify:
 
 - all source files still exist;
-- all source files are still regular .mkv files;
+- all source files are still regular files with recognized video extensions;
+- each planned output preserves its source extension and emits it in lowercase;
 - source metadata has not changed in a way that makes the selected item ambiguous;
 - destination state is compatible with no-overwrite rules;
 - generated names are valid;
@@ -1202,7 +1242,7 @@ Filename generation should follow an explicit sequence:
 5. format season and episode when the item is a series;
 6. assemble the fixed prefix and normalized title;
 7. enforce the final filename-length policy;
-8. append lowercase .mkv;
+8. append the selected source extension in lowercase;
 9. return a filename component, not an arbitrary path.
 
 The generator must not accept a title containing path separators as an already-safe path.
@@ -1256,13 +1296,15 @@ The parser must recognize only the generated contract, not arbitrary media filen
 Conceptual patterns:
 
 ~~~text
-Movie:   ^(?<id>[0-9]+) - (?<title>.+)\.mkv$
-Series:  ^(?<id>[0-9]+) - S(?<season>[0-9]+)E(?<episode>[0-9]+) - (?<title>.+)\.mkv$
+Movie:   ^(?<id>[0-9]+) - (?<title>.+)\.(?<extension>[A-Za-z0-9-]+)$
+Series:  ^(?<id>[0-9]+) - S(?<season>[0-9]+)E(?<episode>[0-9]+) - (?<title>.+)\.(?<extension>[A-Za-z0-9-]+)$
 ~~~
 
 The actual parser should:
 
 - handle the extension case-insensitively when reading external files;
+- validate the extension against the centralized recognized-video-extension policy;
+- preserve the recovered extension and normalize generated extensions to lowercase;
 - validate numeric ranges;
 - distinguish movie and series forms;
 - reject empty titles;
@@ -1316,8 +1358,9 @@ Unit tests should not need a real network or a real terminal.
 Use temporary directories for:
 
 - direct-folder discovery;
-- direct .mkv discovery;
+- recursive recognized-video discovery inside selected folders;
 - case-insensitive extension handling;
+- relative-path display labels for source and preview entries;
 - symbolic-link exclusion where supported;
 - destination exclusion;
 - destination creation after confirmation;
@@ -1642,7 +1685,7 @@ Examples:
 - choosing synchronous versus asynchronous HTTP;
 - choosing a cross-platform no-replace move primitive;
 - choosing a durable operation log;
-- adding recursive discovery;
+- changing the recursive video-discovery or recognized-extension policy;
 - adding persistent metadata storage;
 - changing from one-item-per-folder to per-file metadata.
 
@@ -1685,7 +1728,7 @@ This step should not need a network or terminal.
 - resolve the destination without creating it prematurely;
 - list direct source folders;
 - exclude the destination;
-- list direct case-insensitive .mkv files;
+- recursively list regular files with recognized video extensions inside selected folders;
 - sort deterministically;
 - test with temporary directories.
 
@@ -1833,7 +1876,10 @@ Before handing off any implementation change, verify:
 - [ ] I kept UI, domain, TMDB, naming, and filesystem responsibilities separated.
 - [ ] I used typed values and errors at important boundaries.
 - [ ] I preserved the one-item-per-source-folder rule.
-- [ ] I preserved the direct-folder/direct-.mkv discovery rule.
+- [ ] I preserved direct source-folder discovery plus recursive recognized-video discovery within
+      each selected folder.
+- [ ] I verified that filesystem paths shown by the UI are relative while exact paths remain in
+      typed internal values.
 - [ ] I preserved the documented filename format.
 - [ ] I normalized titles before filename generation, including colon-containing titles.
 - [ ] I added preview and confirmation behavior before mutation.

@@ -20,8 +20,8 @@ const MULTI_SELECT_SEARCH_THRESHOLD: usize = 10;
 #[command(
     name = "title-tmdb-file",
     version,
-    about = "Organize MKV videos with verified TMDB metadata.",
-    long_about = "A polished interactive CLI for selecting MKV videos, identifying movies or TV series in TMDB, and preparing safe metadata-bearing filenames.",
+    about = "Organize video files with verified TMDB metadata.",
+    long_about = "A polished interactive CLI for selecting video files, identifying movies or TV series in TMDB, and preparing safe metadata-bearing filenames.",
     after_help = "Examples:\n  title-tmdb-file\n  title-tmdb-file config\n  title-tmdb-file --help\n  title-tmdb-file --version"
 )]
 pub struct Cli {

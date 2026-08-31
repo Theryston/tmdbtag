@@ -17,17 +17,17 @@ Generate exactly these filename shapes:
 
 ```text
 Movie:
-{tmdb_id} - {normalized_title}.mkv
+{tmdb_id} - {normalized_title}.{video_extension}
 
 Series episode:
-{tmdb_id} - S{season:02}E{episode:02} - {normalized_series_title}.mkv
+{tmdb_id} - S{season:02}E{episode:02} - {normalized_series_title}.{video_extension}
 ```
 
 Examples:
 
 ```text
 550 - Fight Club.mkv
-1399 - S01E01 - Game of Thrones.mkv
+1399 - S01E01 - Game of Thrones.mp4
 519182 - Spider-Man - No Way Home.mkv
 ```
 
@@ -44,7 +44,7 @@ Use validated values rather than arbitrary strings where practical:
 - non-negative season and episode values for series;
 - raw localized title;
 - original title as an optional fallback;
-- fixed `.mkv` extension.
+- the selected source video's recognized extension.
 
 Keep the raw title separate from the normalized title. The raw value is needed for display, diagnostics, and future metadata operations. The normalized value is only for the destination filename.
 
@@ -98,7 +98,7 @@ Movie rules:
 - use the numeric TMDB ID without a `tmdb` prefix;
 - use one ` - ` separator between ID and title;
 - use the normalized localized title, falling back to the original title only when the configured-language title is unavailable;
-- use lowercase `.mkv` in generated names;
+- preserve the selected source video's extension and emit it in lowercase in generated names;
 - omit year, codec, resolution, language, release group, and original filename.
 
 Series rules:
@@ -108,7 +108,7 @@ Series rules:
 - do not truncate values above 99;
 - use the series title, not the episode title;
 - omit arbitrary source filename data;
-- use lowercase `.mkv`.
+- preserve the selected source video's extension and emit it in lowercase.
 
 Do not add random, timestamped, or `(1)`-style collision suffixes. Collisions are a plan-validation error owned by Task 05.
 
@@ -123,16 +123,18 @@ ParsedMediaReference {
     season: optional non-negative integer,
     episode: optional non-negative integer,
     title_hint: normalized title,
+    video_extension: lowercase recognized extension,
 }
 ```
 
 Parsing rules:
 
-- recognize the exact movie and series separators and `.mkv` extension policy;
+- recognize the exact movie and series separators and the documented video-extension policy;
 - infer series type from the presence of `SxxEyy`, but keep API validation as the authority when metadata is fetched later;
 - reject malformed, missing, zero, negative, overflowed, or ambiguous IDs;
 - reject a series marker with only one of season/episode;
 - preserve the title hint as a display hint, not as authoritative metadata;
+- recover and preserve the video extension as part of the parsed reference;
 - never interpret arbitrary source filenames as confirmed TMDB references.
 
 The parser must not perform a network request. A future metadata command can use the parsed ID and type to query TMDB again, then treat the returned title as authoritative.
@@ -195,7 +197,7 @@ Because this layer is pure, prefer exhaustive unit tests and property-style test
 - [ ] Movie names match the documented pattern exactly.
 - [ ] Series names match the documented pattern exactly.
 - [ ] Season and episode values are padded to at least two digits without truncation.
-- [ ] The generated extension is `.mkv`.
+- [ ] The generated extension preserves the selected source extension in lowercase.
 - [ ] The title never contributes unverified source filename data.
 - [ ] Generated names can be parsed back into ID, type, and episode values.
 - [ ] Parsing treats the title as a hint and the ID/type as the recoverable identity.

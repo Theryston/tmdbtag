@@ -153,7 +153,7 @@ The title must remain raw metadata at this boundary. Filename normalization belo
 
 Do not implement in this task:
 
-- source-folder or `.mkv` discovery;
+- source-folder or video-file discovery;
 - file selection;
 - filename normalization or filename parsing;
 - plan construction or collision handling;

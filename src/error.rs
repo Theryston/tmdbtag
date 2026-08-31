@@ -193,6 +193,119 @@ impl TmdbError {
     }
 }
 
+/// Errors raised while resolving the working directory, destination, or selectable media.
+#[derive(Debug, Error)]
+pub enum FilesystemError {
+    /// The process working directory could not be obtained.
+    #[error("Cannot obtain the current working directory: {source}")]
+    CurrentDirectory {
+        /// The operating-system error.
+        #[source]
+        source: io::Error,
+    },
+    /// The resolved source root could not be inspected as a directory.
+    #[error("Cannot inspect the source root at {path}: {source}")]
+    SourceRootMetadata {
+        /// The source-root path.
+        path: PathBuf,
+        /// The operating-system error.
+        #[source]
+        source: io::Error,
+    },
+    /// The current working directory resolved to a non-directory path.
+    #[error("The current working directory is not a directory: {path}")]
+    SourceRootNotDirectory {
+        /// The invalid source-root path.
+        path: PathBuf,
+    },
+    /// A directory could not be enumerated.
+    #[error("Cannot read directory {path}: {source}")]
+    ReadDirectory {
+        /// The directory that was being enumerated.
+        path: PathBuf,
+        /// The operating-system error.
+        #[source]
+        source: io::Error,
+    },
+    /// The user submitted an empty destination path.
+    #[error("The destination path cannot be empty.")]
+    EmptyDestination,
+    /// The destination string cannot be represented as a safe path input.
+    #[error("The destination path `{input}` is invalid: {reason}")]
+    InvalidDestination {
+        /// The sanitized user input retained for the diagnostic.
+        input: String,
+        /// The boundary validation reason.
+        reason: String,
+    },
+    /// The destination path could not be inspected.
+    #[error("Cannot inspect destination path {path}: {source}")]
+    DestinationMetadata {
+        /// The destination path.
+        path: PathBuf,
+        /// The operating-system error.
+        #[source]
+        source: io::Error,
+    },
+    /// The destination path already exists as a regular file.
+    #[error("The destination path is an existing file, not a directory: {path}")]
+    DestinationIsFile {
+        /// The existing file path.
+        path: PathBuf,
+    },
+    /// A symbolic link was supplied where a real destination directory is required.
+    #[error("The destination path is a symbolic link, which is not supported: {path}")]
+    DestinationSymlink {
+        /// The symbolic-link path.
+        path: PathBuf,
+    },
+    /// The existing destination has a type that cannot safely be used as a directory.
+    #[error("The destination path is not a supported directory: {path}")]
+    DestinationUnsupportedType {
+        /// The unsupported path.
+        path: PathBuf,
+    },
+    /// A missing destination has a parent that is not a directory.
+    #[error("The destination parent is not a directory: {path}")]
+    DestinationParentNotDirectory {
+        /// The invalid parent path.
+        path: PathBuf,
+    },
+    /// The current source root cannot also be the destination.
+    #[error("The destination cannot be the current source directory: {path}")]
+    DestinationIsSourceRoot {
+        /// The rejected destination path.
+        path: PathBuf,
+    },
+    /// The destination would be inside a selected source folder.
+    #[error("The destination cannot be a selected source folder or one of its descendants: {path}")]
+    DestinationIsSelectedSource {
+        /// The rejected destination path.
+        path: PathBuf,
+    },
+}
+
+impl FilesystemError {
+    /// Returns the process exit code appropriate for a filesystem failure.
+    pub const fn exit_code(&self) -> i32 {
+        match self {
+            Self::EmptyDestination
+            | Self::InvalidDestination { .. }
+            | Self::DestinationIsFile { .. }
+            | Self::DestinationSymlink { .. }
+            | Self::DestinationUnsupportedType { .. }
+            | Self::DestinationParentNotDirectory { .. }
+            | Self::DestinationIsSourceRoot { .. }
+            | Self::DestinationIsSelectedSource { .. } => 2,
+            Self::CurrentDirectory { .. }
+            | Self::SourceRootMetadata { .. }
+            | Self::SourceRootNotDirectory { .. }
+            | Self::ReadDirectory { .. }
+            | Self::DestinationMetadata { .. } => 1,
+        }
+    }
+}
+
 /// Errors raised at the interactive terminal boundary.
 #[derive(Debug, Error)]
 pub enum UiError {
@@ -240,6 +353,9 @@ pub enum AppError {
     /// TMDB rejected a request or returned an unusable response.
     #[error(transparent)]
     Tmdb(#[from] TmdbError),
+    /// Filesystem discovery or destination validation failed.
+    #[error(transparent)]
+    Filesystem(#[from] FilesystemError),
     /// The normal wizard requires an interactive terminal.
     #[error("This command requires an interactive terminal with stdin and stderr attached.")]
     NonInteractive,
@@ -255,6 +371,7 @@ impl AppError {
             Self::Configuration(error) => error.exit_code(),
             Self::Domain(_) => 2,
             Self::Tmdb(error) => error.exit_code(),
+            Self::Filesystem(error) => error.exit_code(),
             Self::NonInteractive => 2,
             Self::Ui(_) => 1,
         }

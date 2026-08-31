@@ -22,7 +22,7 @@ For every selected source folder:
 - collect and validate season/episode values for every series file;
 - generate normalized destination names;
 - detect all conflicts before confirmation;
-- display complete source and destination paths;
+- display complete source and destination paths as relative UI paths;
 - request a negative-default confirmation;
 - move and rename only after confirmation;
 - report per-file success, failure, and pending status.
@@ -71,7 +71,8 @@ Before showing an executable confirmation, validate every operation:
 - source folder still exists;
 - source file still exists;
 - source file is still a regular file;
-- source file still has a case-insensitive `.mkv` extension;
+- source file still has a recognized video extension, case-insensitively;
+- the generated destination name preserves that source extension in lowercase;
 - selected source paths are not duplicated;
 - source and destination are not the same file;
 - destination exists as a directory or is eligible for creation after confirmation;
@@ -92,8 +93,8 @@ The preview must show the exact operation that will be executed, not a simplifie
 
 - destination folder;
 - total file count;
-- every full source path;
-- every full destination path;
+- every relative source path;
+- every relative destination path;
 - TMDB ID;
 - media type;
 - season and episode where applicable;
@@ -104,16 +105,16 @@ The preview must show the exact operation that will be executed, not a simplifie
 Example:
 
 ```text
-Destination: /library/organized
+Destination: ../library/organized
 
 SOURCE                                      DESTINATION
-/input/movies/Fight Club.mkv                /library/organized/550 - Fight Club.mkv
-/input/series/episode-01.mkv                /library/organized/1399 - S01E01 - Game of Thrones.mkv
+movies/Fight Club.mkv                       ../library/organized/550 - Fight Club.mkv
+series/season-01/episode-01.mp4             ../library/organized/1399 - S01E01 - Game of Thrones.mp4
 
 Move and rename 2 files? [y/N]
 ```
 
-Keep paths readable in narrow terminals through wrapping, truncation with an explicit detail affordance, or a responsive table. Never hide a conflict or replace a path with an unexplained abbreviation.
+Keep relative paths readable in narrow terminals through wrapping, truncation with an explicit detail affordance, or a responsive table. Never hide a conflict or replace a path with an unexplained abbreviation. Exact normalized paths remain in the immutable plan and are the only values passed to the executor.
 
 ### 4. Confirm safely
 
@@ -180,7 +181,7 @@ Do not implement in this task:
 - rollback of files already moved successfully;
 - folder renaming or folder creation beyond the confirmed destination;
 - subtitles, images, `.nfo`, or auxiliary-file movement;
-- recursive traversal;
+- recursive source-folder selection beyond direct children of the current directory;
 - multiple TMDB items in one source folder;
 - a persistent operation database;
 - unattended or confirmation-free execution;
@@ -219,10 +220,10 @@ Do not require a real TMDB API, a real media library, or a particular filesystem
 ## Acceptance checklist
 
 - [ ] The planner enforces one confirmed TMDB item per source folder.
-- [ ] Movies require exactly one selected `.mkv` file.
+- [ ] Movies require exactly one selected recognized video file.
 - [ ] Series files receive individually validated season and episode values.
 - [ ] The full plan is calculated before any filesystem mutation.
-- [ ] All paths, metadata, names, conflicts, and warnings appear in the preview.
+- [ ] All relative paths, metadata, names, conflicts, and warnings appear in the preview.
 - [ ] Any pre-validation failure blocks confirmation and causes zero mutations.
 - [ ] Confirmation is explicit and defaults to no.
 - [ ] Declining confirmation creates no destination and changes no files.

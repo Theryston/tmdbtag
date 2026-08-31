@@ -1,8 +1,8 @@
 # title-tmdb-file
 
-Modern, polished, and highly interactive CLI for organizing .mkv video files using the identifier and title registered in [The Movie Database (TMDB)](https://www.themoviedb.org/).
+Modern, polished, and highly interactive CLI for organizing video files using the identifier and title registered in [The Movie Database (TMDB)](https://www.themoviedb.org/).
 
-> Status: MVP in progress. The CLI foundation, persisted startup configuration, and TMDB identification boundary are implemented. Filesystem discovery, naming, planning, and file movement remain for the following tasks.
+> Status: MVP in progress. The CLI foundation, persisted startup configuration, TMDB identification boundary, and non-mutating filesystem discovery/media selection are implemented. Naming, planning, and file movement remain for the following tasks.
 
 This README is the source of truth for the expected behavior. Any implementation, flow change, or new feature must be compared against this document before it is incorporated.
 
@@ -39,7 +39,7 @@ The program is run inside a folder that contains other folders with video files.
 3. ask which folder will be used as the destination;
 4. list the folders found in the current directory;
 5. allow one or more folders to be selected;
-6. list the .mkv files in each selected folder;
+6. recursively list recognized video files in each selected folder and its real subfolders;
 7. allow one or more video files to be selected;
 8. allow a movie or TV series to be identified by searching TMDB or entering an ID manually;
 9. ask for the season and episode when the item is a TV series;
@@ -57,7 +57,9 @@ The program must not alter the video contents. Its job is to organize: select, r
 - English source code and English user-facing text.
 - Execution using the current working directory as the root of the source folders.
 - Multiple-folder selection.
-- Multiple .mkv-file selection.
+- Multiple video-file selection.
+- Recognition of common video filename extensions such as `.mkv`, `.mp4`, `.avi`, `.mov`, `.webm`, `.m4v`, `.ts`, and `.m2ts`.
+- Recursive video discovery inside real subfolders of each selected source folder.
 - Real-time online search in TMDB.
 - Per-user persistence for the TMDB API key and metadata language in `~/.title-tmdb-file/config.json`.
 - Conditional startup prompts that ask only for missing or invalid saved fields.
@@ -83,7 +85,7 @@ The program must not alter the video contents. Its job is to organize: select, r
 - Maintaining a local database.
 - Overwriting or replacing existing files.
 - Processing multiple different movies or series inside the same source folder.
-- Automatically traversing nested folders.
+- Following symbolic links during discovery.
 - Operating without interactive confirmation.
 
 These items may be considered in the future, but they must not be implemented implicitly.
@@ -93,7 +95,7 @@ These items may be considered in the future, but they must not be implemented im
 | Term | Meaning |
 | --- | --- |
 | Current directory | The directory from which the executable was started. It is the source root in the MVP. |
-| Source folder | A direct child folder of the current directory that contains videos to organize. |
+| Source folder | A direct child folder of the current directory whose real subfolders may contain videos to organize. |
 | Destination folder | The directory selected after startup configuration, where videos will be moved. It may also be called the target folder. |
 | TMDB item | A movie or TV series returned by and confirmed against TMDB. |
 | TMDB ID | The numeric identifier of a movie or TV series in TMDB. |
@@ -107,8 +109,8 @@ These items may be considered in the future, but they must not be implemented im
 
 Each source folder represents one TMDB item.
 
-- A movie folder must have exactly one selected .mkv file.
-- A series folder may have one or more selected .mkv files; each file represents an episode of the same series.
+- A movie folder must have exactly one selected video file.
+- A series folder may have one or more selected video files; each file represents an episode of the same series.
 - If different movies or series are in the same folder, the user must separate them into different folders or run the program again for each group.
 
 This rule prevents one prompt from assigning incorrect metadata to files belonging to different works.
@@ -140,7 +142,7 @@ Select one or more source folders
         |
         v
 For each folder:
-  select .mkv files
+  recursively select video files
   identify a movie or series in TMDB
   if it is a series, enter season/episode per file
         |
@@ -312,20 +314,25 @@ There is no recursive folder selection in the MVP. Only folders immediately insi
 
 ### 6. Selecting video files
 
-For each source folder, list the eligible video files.
+For each selected source folder, recursively list the eligible video files in that folder and in
+its real subfolders.
 
 Listing rules:
 
 - consider only regular files;
-- consider the .mkv extension case-insensitively (.mkv, .MKV, .Mkv, and so on);
-- look only for files directly inside the source folder;
-- do not include nested folders;
+- recognize the supported video extensions case-insensitively, including `.mkv`, `.mp4`, `.avi`,
+  `.mov`, `.webm`, `.m4v`, `.ts`, `.m2ts`, `.wmv`, `.flv`, and other extensions in the centralized
+  video-extension allowlist;
+- recurse into real subfolders of the selected source folder;
+- never select a directory as a video file;
 - do not follow symbolic links;
-- sort files deterministically;
-- show at least the filename; size and relative path are recommended;
+- sort files deterministically by their relative path;
+- display each file using a path relative to its selected source folder, with the source folder
+  itself displayed relative to the current directory;
+- retain the exact source `PathBuf` internally for later validation and movement;
 - allow one or more files to be selected;
 - require at least one file for the folder to continue;
-- if there are no .mkv files, explain why and allow the user to cancel or go back.
+- if there are no eligible video files, explain why and allow the user to cancel or go back.
 
 The program must not automatically select the first file. The choice must be explicit.
 
@@ -375,7 +382,7 @@ When the user chooses to enter an ID:
 
 ### 8. Series episode data
 
-For each selected .mkv file belonging to a series, ask for:
+For each selected video file belonging to a series, ask for:
 
 - the season number;
 - the episode number.
@@ -395,11 +402,11 @@ Example:
 ~~~text
 Confirmed series: Game of Thrones (TMDB 1399)
 
-File: episode-01.mkv
+File: season-01/episode-01.mp4
 Season: 1
 Episode: 1
 
-File: episode-02.mkv
+File: season-01/episode-02.mp4
 Season: 1
 Episode: 2
 ~~~
@@ -411,24 +418,29 @@ The title used in the filename is the series title returned by TMDB, not the ind
 Before moving any file, display every operation that will be performed:
 
 ~~~text
-Destination: /library/organized
+Destination: ../library/organized
 
-SOURCE                                                DESTINATION
-/input/movies/Fight Club.mkv                          /library/organized/550 - Fight Club.mkv
-/input/series/episode-01.mkv                          /library/organized/1399 - S01E01 - Game of Thrones.mkv
-/input/series/episode-02.mkv                          /library/organized/1399 - S01E02 - Game of Thrones.mkv
+SOURCE                                      DESTINATION
+movies/Fight Club.mkv                       ../library/organized/550 - Fight Club.mkv
+series/season-01/episode-01.mp4             ../library/organized/1399 - S01E01 - Game of Thrones.mp4
+series/season-01/episode-02.mp4             ../library/organized/1399 - S01E02 - Game of Thrones.mp4
 ~~~
 
 The preview must show:
 
 - the destination folder;
 - the total number of files;
-- the full source path for every file;
-- the full destination path for every file;
+- a relative source path for every file;
+- a relative destination path for every file;
 - the TMDB ID;
 - the item type;
 - season and episode when applicable;
 - detected conflicts or warnings.
+
+The normal interactive UI shows media paths relative to the current source root. A video inside a
+subfolder is shown with its path relative to the selected source folder so that the relevant folder
+context remains clear. The application retains absolute or normalized `PathBuf` values internally;
+relative display text must never be used as an execution path.
 
 If there is a validation error or conflict, confirmation of the plan must not be allowed until the issue is corrected or the group is canceled.
 
@@ -553,12 +565,12 @@ The CLI should feel fast even when the work is not instantaneous:
 
 ## Naming Convention
 
-The final filename must contain the TMDB ID and the title returned by the API after mandatory filename normalization. The final extension is always .mkv in lowercase.
+The final filename must contain the TMDB ID and the title returned by the API after mandatory filename normalization. The final extension is the selected source video's extension, emitted in lowercase. The program must preserve the video's format and must never rename an `.mp4` source to `.mkv` merely as part of organization.
 
 | Type | Format | Example |
 | --- | --- | --- |
-| Movie | &lt;id&gt; - &lt;normalized_title&gt;.mkv | 550 - Fight Club.mkv |
-| Series | &lt;id&gt; - S&lt;season&gt;E&lt;episode&gt; - &lt;normalized_series_title&gt;.mkv | 1399 - S01E01 - Game of Thrones.mkv |
+| Movie | &lt;id&gt; - &lt;normalized_title&gt;.&lt;video_extension&gt; | 550 - Fight Club.mkv |
+| Series | &lt;id&gt; - S&lt;season&gt;E&lt;episode&gt; - &lt;normalized_series_title&gt;.&lt;video_extension&gt; | 1399 - S01E01 - Game of Thrones.mp4 |
 
 ### Composition rules
 
@@ -569,6 +581,7 @@ The final filename must contain the TMDB ID and the title returned by the API af
 - if no localized title is available, use the original title returned by the API;
 - preserve accents and safe Unicode characters;
 - write the season and episode with at least two digits (S01E02, S10E03); larger numbers must not be truncated;
+- preserve the selected source video's extension and write it in lowercase;
 - do not include the episode title in the MVP;
 - do not include information that was not obtained from the confirmed TMDB item.
 
@@ -735,7 +748,8 @@ Before confirmation, validate every item:
 
 - the source folder still exists;
 - each file still exists and is the same file that was selected;
-- each file is still a regular .mkv file;
+- each file is still a regular file with a recognized video extension;
+- each generated filename preserves the selected source video's extension in lowercase;
 - the destination exists or can be created;
 - the destination is writable;
 - no calculated destination already exists;
@@ -786,11 +800,14 @@ There will be no local database in the MVP. The filename is the minimum index fo
 The future parser must recognize:
 
 ~~~text
-Movie:   ^(?<id>[0-9]+) - (?<title>.+)\.mkv$
-Series:  ^(?<id>[0-9]+) - S(?<season>[0-9]+)E(?<episode>[0-9]+) - (?<title>.+)\.mkv$
+Movie:   ^(?<id>[0-9]+) - (?<title>.+)\.(?<extension>[A-Za-z0-9-]+)$
+Series:  ^(?<id>[0-9]+) - S(?<season>[0-9]+)E(?<episode>[0-9]+) - (?<title>.+)\.(?<extension>[A-Za-z0-9-]+)$
 ~~~
 
-The actual expression must treat the extension case-insensitively when reading external files, although the program always writes .mkv in lowercase.
+The actual expression must treat the extension case-insensitively when reading external files,
+validate it against the supported video-extension policy, and normalize the generated extension to
+lowercase. The parser must preserve the recovered extension because a future operation may need to
+retain the video's format.
 
 The parser must produce a reference equivalent to:
 
@@ -868,6 +885,7 @@ title-tmdb-file/
     ├── domain.rs
     ├── error.rs
     ├── ui.rs
+    ├── filesystem.rs
     └── tmdb/
         ├── mod.rs
         ├── client.rs
@@ -973,7 +991,7 @@ Minimum categories:
 - unreadable current directory;
 - unavailable, unreadable, malformed, or unwritable per-user configuration file;
 - invalid destination path;
-- folder with no eligible .mkv files;
+- folder with no eligible video files;
 - invalid ID, season, or episode input;
 - missing or rejected credential;
 - item not found in TMDB;
@@ -1007,12 +1025,13 @@ The MVP is complete only when all of the following criteria are met:
 - [x] Persist a complete configuration without exposing the API key in application output.
 - [x] Provide `title-tmdb-file config` to deliberately edit and save both fields.
 - [x] Validate the API key and language before filesystem discovery.
-- [ ] Start in the current directory without requiring a separate source-folder configuration.
-- [ ] Ask for the destination after startup configuration and before listing sources.
-- [ ] List only direct child folders as source options.
-- [ ] Allow multiple-folder selection.
-- [ ] List only direct .mkv files from each selected folder.
-- [ ] Allow multiple-file selection.
+- [x] Start in the current directory without requiring a separate source-folder configuration.
+- [x] Ask for the destination after startup configuration and before listing sources.
+- [x] List only direct child folders as source options.
+- [x] Allow multiple-folder selection.
+- [x] Recursively list recognized video files from each selected folder and its real subfolders.
+- [x] Show filesystem paths as relative display paths while retaining exact paths internally.
+- [x] Allow multiple-file selection.
 - [ ] Apply the one-TMDB-item-per-folder rule.
 - [x] Search movies and series in real time.
 - [x] Allow the user to enter an ID and type manually.
@@ -1047,8 +1066,10 @@ The MVP is complete only when all of the following criteria are met:
 
 Use temporary directories to verify:
 
-- discovery of direct folders only;
-- case-insensitive .mkv filtering;
+- discovery of direct source folders only;
+- recursive discovery of regular files with case-insensitive recognized video extensions;
+- symbolic-link and nested-directory safety during video discovery;
+- relative path labels for source folders, nested video files, and preview entries;
 - exclusion of the destination from source options;
 - same-volume movement;
 - existing-destination behavior;
@@ -1105,9 +1126,9 @@ The detailed implementation breakdown is maintained in [Implementation Tasks](ta
 
 - [x] Implement the clap command parser and verify its help/version output.
 - [x] Choose and validate the dedicated interactive terminal UI library.
-- [ ] Implement discovery of the current directory and destination.
-- [ ] Implement multiple-folder and .mkv selection.
-- [ ] Implement cancellation and local validation.
+- [x] Implement discovery of the current directory and destination.
+- [x] Implement multiple-folder selection and recursive multi-format video selection.
+- [x] Implement cancellation and local validation.
 
 ### Phase 2 — TMDB
 
@@ -1130,7 +1151,7 @@ The detailed implementation breakdown is maintained in [Implementation Tasks](ta
 - [ ] Implement parsing of generated filenames.
 - [ ] Add a separate command to query metadata from a filename.
 - [ ] Evaluate non-interactive mode and --dry-run.
-- [ ] Evaluate nested folders, multiple titles per folder, subtitles, and auxiliary files.
+- [ ] Evaluate recursive source-folder selection, multiple titles per folder, subtitles, and auxiliary files.
 - [ ] Evaluate undo/operation logs without changing the MVP's safe behavior.
 
 ## References

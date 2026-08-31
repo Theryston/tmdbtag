@@ -71,7 +71,7 @@ The UI boundary should be able to express the following interactions without exp
 - ask for the TMDB metadata language;
 - ask for a destination path;
 - select one or more source folders;
-- select one or more `.mkv` files;
+- select one or more recognized video files;
 - search and select a TMDB result;
 - choose movie or series for a manual ID;
 - ask for season and episode values;
@@ -137,7 +137,7 @@ The interface may be beautiful, but visual polish must not conceal what will hap
 Do not implement in this task:
 
 - TMDB HTTP requests or API response mapping;
-- filesystem traversal or `.mkv` filtering;
+- filesystem traversal or video-extension filtering;
 - filename normalization or parsing;
 - moving, copying, renaming, deleting, or creating media files/directories;
 - persistent TMDB metadata caching or a local database;
