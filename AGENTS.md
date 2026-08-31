@@ -42,6 +42,13 @@ title-tmdb-file/
 ├── Cargo.toml
 ├── README.md
 ├── AGENTS.md
+├── tasks/
+│   ├── README.md
+│   ├── 01-cli-foundation-and-interactive-shell.md
+│   ├── 02-tmdb-configuration-and-identification.md
+│   ├── 03-filesystem-discovery-and-media-selection.md
+│   ├── 04-naming-normalization-and-metadata-recovery.md
+│   └── 05-plan-preview-and-safe-file-movement.md
 └── src/
     └── main.rs
 ~~~
@@ -1538,6 +1545,17 @@ Update this file when changing:
 - safety guarantees.
 
 Do not use AGENTS.md to hide product behavior that belongs in README.md.
+
+### tasks/
+
+Keep the task breakdown synchronized with the product specification and implementation state.
+
+- Update the relevant task when its scope, dependency, acceptance criteria, or implementation boundary changes.
+- Keep task status honest; a checklist item is not complete because a module or placeholder exists.
+- Do not create duplicate micro-tasks for individual functions, tests, or formatting work.
+- Keep capability-specific tests and verification requirements in the task that owns the capability.
+- If a product decision changes behavior, update README.md first, then update the affected task and this file when engineering rules also change.
+- Preserve the dependency order documented in `tasks/README.md`, unless the change is intentional and documented.
 
 ### Architecture decisions
 

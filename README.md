@@ -26,6 +26,7 @@ The command-line contract must be implemented with clap. The normal workflow is 
 - [Errors and Exit Codes](#errors-and-exit-codes)
 - [Acceptance Criteria](#acceptance-criteria)
 - [Testing Strategy](#testing-strategy)
+- [Implementation Tasks](#implementation-tasks)
 - [Roadmap](#roadmap)
 - [References](#references)
 
@@ -788,6 +789,13 @@ title-tmdb-file/
 ├── Cargo.toml
 ├── README.md
 ├── AGENTS.md
+├── tasks/
+│   ├── README.md
+│   ├── 01-cli-foundation-and-interactive-shell.md
+│   ├── 02-tmdb-configuration-and-identification.md
+│   ├── 03-filesystem-discovery-and-media-selection.md
+│   ├── 04-naming-normalization-and-metadata-recovery.md
+│   └── 05-plan-preview-and-safe-file-movement.md
 └── src/
     └── main.rs
 ~~~
@@ -799,6 +807,14 @@ title-tmdb-file/
 ├── Cargo.toml
 ├── Cargo.lock
 ├── README.md
+├── AGENTS.md
+├── tasks/
+│   ├── README.md
+│   ├── 01-cli-foundation-and-interactive-shell.md
+│   ├── 02-tmdb-configuration-and-identification.md
+│   ├── 03-filesystem-discovery-and-media-selection.md
+│   ├── 04-naming-normalization-and-metadata-recovery.md
+│   └── 05-plan-preview-and-safe-file-movement.md
 ├── src/
 │   ├── main.rs              # binary entry point and exit code
 │   ├── app.rs               # orchestration of the complete flow
@@ -965,7 +981,23 @@ Before a usable release, test at least:
 8. a destination that already contains an identical name;
 9. source and destination on different volumes, when the environment allows it.
 
+## Implementation Tasks
+
+The implementation scope is intentionally divided into five cohesive tasks rather than many small tickets. Each task owns one meaningful capability and includes its own implementation boundaries, tests, safety requirements, and acceptance checklist.
+
+The recommended task order and dependencies are documented in [`tasks/README.md`](tasks/README.md):
+
+1. [CLI foundation and interactive terminal shell](tasks/01-cli-foundation-and-interactive-shell.md)
+2. [TMDB configuration and identification](tasks/02-tmdb-configuration-and-identification.md)
+3. [Filesystem discovery and media selection](tasks/03-filesystem-discovery-and-media-selection.md)
+4. [Naming normalization and metadata recovery](tasks/04-naming-normalization-and-metadata-recovery.md)
+5. [Plan, preview, and safe file movement](tasks/05-plan-preview-and-safe-file-movement.md)
+
+These task files are execution guidance derived from this README. They do not replace this product contract. If implementation reveals a necessary behavior change, update the README, the relevant task, and AGENTS.md together before treating the change as intentional.
+
 ## Roadmap
+
+The detailed implementation breakdown is maintained in [Implementation Tasks](tasks/README.md). The roadmap below provides the higher-level product phases; the task files provide the actionable scope within those phases.
 
 ### Phase 0 — Specification
 
