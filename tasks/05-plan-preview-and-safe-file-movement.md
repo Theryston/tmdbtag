@@ -16,7 +16,7 @@ The central rule is: build and validate the complete operation plan first, displ
 For every selected video file:
 
 - run one complete identification loop and associate one confirmed TMDB movie or series;
-- allow multiple independent TMDB items to come from the same source folder;
+- allow multiple independent TMDB items to come from the same directory tree;
 - collect and validate season/episode values when that file is identified as a series;
 - generate normalized destination names;
 - detect all conflicts before confirmation;
@@ -53,7 +53,7 @@ The exact Rust types may differ, but a plan must be immutable from preview throu
 
 The planner must:
 
-- associate every file with the selected source folder for context;
+- associate every file with its internal source container for validation context;
 - identify and confirm the TMDB item independently for every selected file;
 - create one movie operation for every file identified as a movie;
 - collect series season and episode values per file identified as a series;
@@ -81,7 +81,7 @@ Before showing an executable confirmation, validate every operation:
 - all series episodes were validated;
 - generated names contain no unsafe path traversal;
 - relevant operating-system path limits are respected;
-- the destination is not one of the selected source folders.
+- the destination is not one of the selected nested source containers.
 
 If any operation fails validation, do not offer confirmation and do not mutate any file. Show the affected item and an actionable correction path.
 
@@ -179,7 +179,7 @@ Do not implement in this task:
 - rollback of files already moved successfully;
 - folder renaming or folder creation beyond the confirmed destination;
 - subtitles, images, `.nfo`, or auxiliary-file movement;
-- recursive source-folder selection beyond direct children of the current directory;
+- alternate filesystem traversal outside the current source-root explorer;
 - a persistent operation database;
 - unattended or confirmation-free execution;
 - re-encoding or modifying video contents;
@@ -189,11 +189,11 @@ Do not implement in this task:
 
 Cover the full lifecycle with temporary directories and fake TMDB/UI boundaries:
 
-- one movie folder with one file;
-- one source folder with multiple selected movie files, each using its own identification loop;
-- one series folder with multiple episodes;
+- one directory tree containing one movie file;
+- one directory tree with multiple selected movie files, each using its own identification loop;
+- one directory tree with multiple series episodes;
 - duplicate series episode values;
-- multiple source folders in one run;
+- root-level and nested videos selected together from one explorer;
 - missing or changed source file after selection;
 - destination already existing;
 - duplicate destination names within a plan;
@@ -217,7 +217,7 @@ Do not require a real TMDB API, a real media library, or a particular filesystem
 ## Acceptance checklist
 
 - [x] The planner runs one confirmed TMDB identification loop for every selected video file.
-- [x] Multiple independent movie or series items can be selected from the same source folder.
+- [x] Multiple independent movie or series items can be selected from the same directory tree.
 - [x] Series files receive individually identified and validated season and episode values.
 - [x] The full plan is calculated before any filesystem mutation.
 - [x] All relative paths, metadata, names, conflicts, and warnings appear in the preview or actionable validation output.

@@ -32,19 +32,22 @@ The command-line contract must be implemented with clap. The normal workflow is 
 
 ## Objective
 
-The program is run inside a folder that contains other folders with video files. It must:
+The program is run inside a folder that may contain video files directly and may contain nested
+folders with video files. It must:
 
 1. load the saved TMDB configuration from `~/.title-tmdb-file/config.json` on Unix-like systems, or the equivalent current user's home directory on Windows;
 2. ask only for missing or invalid TMDB configuration fields, using secure prompts;
 3. ask which folder will be used as the destination;
-4. list the folders found in the current directory;
-5. allow one or more folders to be selected;
-6. recursively list recognized video files in each selected folder and its real subfolders;
-7. allow one or more video files to be selected;
-8. identify every selected video file as a movie or TV series by searching TMDB or entering an ID manually;
-9. ask for the season and episode for each selected video identified as a TV series;
-10. show a complete operation plan;
-11. move the selected files to the destination folder, renaming them with enough data to locate the item in TMDB again.
+4. recursively discover every recognized video file below the current directory, including videos
+   directly in the current directory;
+5. present one expandable file-explorer selection containing video files and only the folders that
+   contain at least one video descendant;
+6. allow one or more video files to be selected from that explorer, with folders collapsed by default
+   and expanded or collapsed with `Tab`;
+7. identify every selected video file as a movie or TV series by searching TMDB or entering an ID manually;
+8. ask for the season and episode for each selected video identified as a TV series;
+9. show a complete operation plan;
+10. move the selected files to the destination folder, renaming them with enough data to locate the item in TMDB again.
 
 The program must not alter the video contents. Its job is to organize: select, rename, and move.
 
@@ -55,18 +58,21 @@ The program must not alter the video contents. Its job is to organize: select, r
 - clap-based command-line parsing and standard --help and --version behavior.
 - A modern, polished, highly interactive terminal interface.
 - English source code and English user-facing text.
-- Execution using the current working directory as the root of the source folders.
-- Multiple-folder selection.
-- Multiple video-file selection.
+- Execution using the current working directory as the source root.
+- One unified, expandable video-file explorer rooted at the current directory.
+- Multiple video-file selection from any visible level of that explorer.
 - Recognition of common video filename extensions such as `.mkv`, `.mp4`, `.avi`, `.mov`, `.webm`, `.m4v`, `.ts`, and `.m2ts`.
-- Recursive video discovery inside real subfolders of each selected source folder.
+- Recursive video discovery inside the current directory and all real subfolders.
+- Display of only folders that contain at least one eligible video descendant.
+- Collapsed-by-default folders with `Tab` expand/collapse navigation.
+- Destination-subtree exclusion from discovery at any depth.
 - Real-time online search in TMDB.
 - Per-user persistence for the TMDB API key and metadata language in `~/.title-tmdb-file/config.json`.
 - Conditional startup prompts that ask only for missing or invalid saved fields.
 - A `config` command that deliberately reopens both configuration fields.
 - Manual identification by numeric TMDB ID.
 - Support for movies and TV series.
-- A complete TMDB identification loop for every selected video file, including files in the same source folder.
+- A complete TMDB identification loop for every selected video file, including files in the same directory tree.
 - Manual season and episode input for each series file.
 - Plan preview before any change is made to disk.
 - Actual file movement rather than an implicit copy.
@@ -95,7 +101,7 @@ These items may be considered in the future, but they must not be implemented im
 | Term | Meaning |
 | --- | --- |
 | Current directory | The directory from which the executable was started. It is the source root in the MVP. |
-| Source folder | A direct child folder of the current directory whose real subfolders may contain videos to organize. |
+| Source container | An internal validation grouping: the direct child folder containing a selected nested video, or the current source root for a video selected directly from the root. It is not a separate user selection. |
 | Destination folder | The directory selected after startup configuration, where videos will be moved. It may also be called the target folder. |
 | TMDB item | A movie or TV series returned by and confirmed against TMDB. |
 | TMDB ID | The numeric identifier of a movie or TV series in TMDB. |
@@ -107,19 +113,19 @@ These items may be considered in the future, but they must not be implemented im
 
 ### Unit-of-work rule
 
-Each selected video file represents one independent TMDB identification unit. The source folder is
-selection context and does not determine the metadata assigned to every file inside it.
+Each selected video file represents one independent TMDB identification unit. The explorer folder
+is display context and does not determine the metadata assigned to every file inside it.
 
 - Every selected video runs the complete identification loop: choose search or manual ID, resolve
   and confirm the TMDB item, and then continue to naming.
 - A movie file produces one movie operation and does not need an episode reference.
 - A series file produces one episode operation after its season and episode are individually
   validated against TMDB.
-- Multiple files in the same source folder may represent different movies, different series, or
+- Multiple files in the same directory tree may represent different movies, different series, or
   multiple episodes of the same series.
 
 This rule prevents one prompt from assigning the same metadata to files that may belong to
-different works while preserving the convenient folder-based file selection step.
+different works while the explorer keeps the entire media tree visible in one selection step.
 
 ## Main Flow
 
@@ -144,14 +150,18 @@ Validate TMDB configuration
 Choose the destination folder
         |
         v
-Select one or more source folders
+Recursively scan the current directory, excluding the destination subtree
         |
         v
-For each folder:
-  recursively select video files
-  for each selected video:
-    identify a movie or series in TMDB
-    if it is a series, enter season/episode for that video
+Use one collapsed-by-default expandable video explorer
+  select individual videos with Space
+  expand or collapse folders with Tab
+  confirm the complete video array with Enter
+        |
+        v
+For each selected video:
+  identify a movie or series in TMDB
+  if it is a series, enter season/episode for that video
         |
         v
 Validate all paths and conflicts
@@ -169,7 +179,7 @@ Move and rename the files
 Display the final summary
 ~~~
 
-The saved TMDB configuration must be loaded before filesystem discovery. If the file is absent, or if either field is absent, empty, or invalid, the corresponding English prompt is shown and the completed values are saved. When both fields are valid in the file, the normal organization workflow does not prompt for them again. The destination folder must then be requested before source folders are listed. This allows it to be excluded from the list when it is a subfolder of the current directory and prevents the destination itself from being selected as a source. clap must process --help, --version, and command-level help before the interactive wizard; those paths exit without asking for credentials or touching the filesystem.
+The saved TMDB configuration must be loaded before filesystem discovery. If the file is absent, or if either field is absent, empty, or invalid, the corresponding English prompt is shown and the completed values are saved. When both fields are valid in the file, the normal organization workflow does not prompt for them again. The destination folder must then be requested before the unified media tree is scanned so its entire subtree can be excluded. clap must process --help, --version, and command-level help before the interactive wizard; those paths exit without asking for credentials or touching the filesystem.
 
 ## Interface Contract
 
@@ -239,7 +249,7 @@ The normal workflow follows these rules:
 - keep all application-owned prompts and messages in English.
 
 When both fields need to be collected, the API-key question is always first. The prompts happen
-before the destination prompt, source-folder discovery, or video-file discovery.
+before the destination prompt or any media discovery.
 
 Rules for the API-key prompt:
 
@@ -249,7 +259,7 @@ Rules for the API-key prompt:
 - use the saved key as the masked default when it exists;
 - use `TMDB_API_KEY` as a masked default only when the saved key is unavailable;
 - never display the key in a preview, error, debug representation, log, or report;
-- validate the key against TMDB before proceeding to filesystem selection;
+- validate the key against TMDB before proceeding to media-tree selection;
 - allow retry or cancellation when the key is rejected.
 
 Rules for the language prompt:
@@ -273,7 +283,7 @@ At startup:
 
 - obtain the current working directory;
 - verify that it exists and can be read;
-- do not assume that the executable's folder is the source folder;
+- do not assume that the executable's folder is the source root;
 - do not change anything before final confirmation.
 
 Expected usage:
@@ -295,57 +305,49 @@ Rules:
 - if the folder does not exist, explicitly ask whether it should be created;
 - reject a path that exists as a file;
 - reject the current directory as the destination;
-- reject a selected source folder as the destination;
-- when the destination is inside the current directory, do not list it as an available source folder;
+- reject a path that would overlap a selected source container, except that the current source root
+  may contain a destination child when the selected files are directly in the root;
+- when the destination is inside the current directory, exclude its complete subtree from the media
+  explorer;
 - do not create the folder while the path is being entered; creation may happen only after validation and the user's confirmation.
 
 Once defined, the destination must remain visible throughout the rest of the flow.
 
-### 5. Selecting source folders
+### 5. Unified video-file explorer
 
-List the direct child folders of the current directory.
+After the destination is configured, perform one recursive, read-only discovery from the current
+directory. The result feeds one interactive explorer; there is no separate source-folder selection
+followed by one video selector per folder.
 
-Listing rules:
+Discovery and explorer rules:
 
-- include real directories;
-- do not include files;
-- do not follow symbolic links in the MVP;
-- sort deterministically, preferably case-insensitively;
-- show the name and, when useful, the relative path;
-- exclude the destination when it is inside the current directory;
-- allow one or more folders to be selected;
-- require at least one folder to continue;
-- allow cancellation without modifying any files.
-
-There is no recursive folder selection in the MVP. Only folders immediately inside the current directory participate in this step.
-
-### 6. Selecting video files
-
-For each selected source folder, recursively list the eligible video files in that folder and in
-its real subfolders.
-
-Listing rules:
-
-- consider only regular files;
+- include regular video files directly in the current directory;
+- recurse into real subdirectories at every depth;
 - recognize the supported video extensions case-insensitively, including `.mkv`, `.mp4`, `.avi`,
   `.mov`, `.webm`, `.m4v`, `.ts`, `.m2ts`, `.wmv`, `.flv`, and other extensions in the centralized
   video-extension allowlist;
-- recurse into real subfolders of the selected source folder;
-- never select a directory as a video file;
-- do not follow symbolic links;
-- sort files deterministically by their relative path;
-- display each file using a path relative to its selected source folder, with the source folder
-  itself displayed relative to the current directory;
-- retain the exact source `PathBuf` internally for later validation and movement;
-- allow one or more files to be selected;
-- require at least one file for the folder to continue;
-- if there are no eligible video files, explain why and allow the user to cancel or go back.
+- never follow symbolic links;
+- exclude the destination directory and every descendant below it;
+- include a folder row only when it contains at least one discovered video descendant;
+- sort sibling folders and files deterministically by relative path;
+- display all rows with paths relative to the current source root;
+- retain the exact source `PathBuf` for every file; display labels are never execution paths;
+- show all folder rows collapsed by default;
+- move the cursor with the arrow keys (and supported navigation aliases);
+- use `Tab` to expand or collapse the highlighted folder;
+- use `Space` to select or deselect a highlighted video file;
+- make folders containers rather than selectable media items;
+- use `Enter` to confirm the selected video array;
+- require at least one explicitly selected video;
+- allow `Escape`/cancel without modifying any files;
+- show a helpful empty state when the current directory contains no eligible videos.
 
-The program must not automatically select the first file. The choice must be explicit.
+The explorer is a single selection operation. Expanding a folder changes visibility only; it does
+not select every descendant automatically. The first file must never be selected silently.
 
-### 7. Identifying the item in TMDB
+### 6. Identifying the item in TMDB
 
-After the files for a folder are selected, present two options:
+After the unified video array is confirmed, present two options for each selected file:
 
 1. search by text;
 2. enter a TMDB ID directly.
@@ -386,9 +388,9 @@ When the user chooses to enter an ID:
 - show the returned title and ask for confirmation;
 - never accept a manually entered title as a substitute for TMDB data;
 - repeat this complete identification flow independently for every selected video file, including
-  multiple files from the same source folder.
+  multiple files from the same directory tree.
 
-### 8. Series episode data
+### 7. Series episode data
 
 After a selected video file has been identified as a series, ask for:
 
@@ -405,7 +407,7 @@ Rules:
 - allow the input to be corrected before the preview;
 - do not infer these numbers from the original filename in the MVP.
 
-TMDB identification is repeated for every selected video file. Files in the same source folder do
+TMDB identification is repeated for every selected video file. Files in the same directory tree do
 not implicitly share a series or movie selection; the user confirms the metadata for each file.
 
 Example:
@@ -424,7 +426,7 @@ Episode: 2
 
 The title used in the filename is the series title returned by TMDB, not the individual episode title. The series ID combined with SxxEyy identifies the episode.
 
-### 9. Plan preview
+### 8. Plan preview
 
 Before moving any file, display every operation that will be performed:
 
@@ -448,14 +450,15 @@ The preview must show:
 - season and episode when applicable;
 - detected conflicts or warnings.
 
-The normal interactive UI shows media paths relative to the current source root. A video inside a
-subfolder is shown with its path relative to the selected source folder so that the relevant folder
-context remains clear. The application retains absolute or normalized `PathBuf` values internally;
-relative display text must never be used as an execution path.
+The normal interactive UI shows every media-tree path relative to the current source root. A video
+inside a nested folder is displayed with its complete relative path, while indentation and folder
+icons communicate the hierarchy. The application retains absolute or normalized `PathBuf` values
+internally; relative display text must never be used as an execution path. Long explorer labels may
+be truncated for terminal width, but the suffix containing the filename should remain visible.
 
 If there is a validation error or conflict, confirmation of the plan must not be allowed until the issue is corrected or the group is canceled.
 
-### 10. Confirmation and result
+### 9. Confirmation and result
 
 The final prompt must be explicit, for example:
 
@@ -508,8 +511,14 @@ The terminal UI should include, where supported by the chosen interaction librar
 - clear section titles;
 - consistent success, warning, error, and informational styles;
 - aligned tables or panels for source and destination paths;
-- a visible count of selected folders and files;
-- a clear indication of the current source folder while processing a batch;
+- a visible count of discovered and selected video files;
+- a clear indication that the current selection is rooted in the current directory;
+- a compact tree explorer with visible folder expand/collapse state;
+- an explicit keyboard hint for `Space` selection, `Tab` expansion/collapse, and `Enter` confirmation;
+- a bounded per-file context box showing the selected file's relative path, with long paths
+  truncated from the left so the filename remains visible;
+- all TMDB search, selection, confirmation, and series episode prompts for one file grouped inside
+  that file's context until its identification is complete;
 - a concise final summary;
 - a graceful fallback when color, Unicode, or advanced terminal features are unavailable.
 
@@ -664,7 +673,7 @@ The startup configuration sequence is:
 3. ask only for missing or invalid fields, with the API key before the language when both are needed;
 4. save the complete configuration after successful local validation;
 5. validate the key and language with TMDB;
-6. only then continue to destination and source-folder selection.
+6. only then continue to destination and unified media-tree selection.
 
 The `title-tmdb-file config` command deliberately skips the media workflow and reopens both fields so
 the user can replace the saved values. It uses the same prompt, validation, and persistence code as
@@ -1048,10 +1057,12 @@ The MVP is complete only when all of the following criteria are met:
 - [x] Provide `title-tmdb-file config` to deliberately edit and save both fields.
 - [x] Validate the API key and language before filesystem discovery.
 - [x] Start in the current directory without requiring a separate source-folder configuration.
-- [x] Ask for the destination after startup configuration and before listing sources.
-- [x] List only direct child folders as source options.
-- [x] Allow multiple-folder selection.
-- [x] Recursively list recognized video files from each selected folder and its real subfolders.
+- [x] Ask for the destination after startup configuration and before scanning media.
+- [x] Recursively discover recognized video files from the current directory and its real subfolders.
+- [x] Include video files directly in the current directory.
+- [x] Exclude the destination and its descendants from discovery.
+- [x] Show one expandable, collapsed-by-default video explorer.
+- [x] Expand and collapse folders with `Tab` and select individual videos with `Space`.
 - [x] Show filesystem paths as relative display paths while retaining exact paths internally.
 - [x] Allow multiple-file selection.
 - [x] Run a separate confirmed TMDB identification loop for every selected video file.
@@ -1088,11 +1099,12 @@ The MVP is complete only when all of the following criteria are met:
 
 Use temporary directories to verify:
 
-- discovery of direct source folders only;
-- recursive discovery of regular files with case-insensitive recognized video extensions;
+- unified source-root discovery of regular files with case-insensitive recognized video extensions;
+- root-level and nested video discovery;
 - symbolic-link and nested-directory safety during video discovery;
-- relative path labels for source folders, nested video files, and preview entries;
-- exclusion of the destination from source options;
+- relative path labels for explorer rows, nested video files, and preview entries;
+- exclusion of the destination subtree from the explorer;
+- collapsed/expanded tree construction and explicit file selection;
 - same-volume movement;
 - existing-destination behavior;
 - source preservation on failure;
@@ -1111,10 +1123,10 @@ Use temporary directories to verify:
 
 Before a usable release, test at least:
 
-1. one folder containing one movie;
-2. one folder containing multiple independent movie files;
-3. one folder containing multiple episodes of a series, with identification repeated per file;
-4. more than one folder in the same execution;
+1. one root-level video selected from the explorer;
+2. one directory tree containing multiple independent movie files;
+3. one directory tree containing multiple episodes of a series, with identification repeated per file;
+4. root-level and nested videos selected together in the same explorer;
 5. a destination outside the current directory;
 6. a destination inside the current directory;
 7. a title with characters invalid for filenames;
@@ -1150,7 +1162,7 @@ The detailed implementation breakdown is maintained in [Implementation Tasks](ta
 - [x] Implement the clap command parser and verify its help/version output.
 - [x] Choose and validate the dedicated interactive terminal UI library.
 - [x] Implement discovery of the current directory and destination.
-- [x] Implement multiple-folder selection and recursive multi-format video selection.
+- [x] Implement one unified expandable explorer for root-level and recursively nested videos.
 - [x] Implement cancellation and local validation.
 
 ### Phase 2 — TMDB
@@ -1175,7 +1187,7 @@ The detailed implementation breakdown is maintained in [Implementation Tasks](ta
 - [x] Implement parsing of generated filenames.
 - [ ] Add a separate command to query metadata from a filename.
 - [ ] Evaluate non-interactive mode and --dry-run.
-- [ ] Evaluate recursive source-folder selection, subtitles, and auxiliary files.
+- [ ] Evaluate richer explorer filtering, subtitles, and auxiliary files.
 - [ ] Evaluate undo/operation logs without changing the MVP's safe behavior.
 
 ## References

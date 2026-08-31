@@ -70,8 +70,8 @@ The UI boundary should be able to express the following interactions without exp
 - ask for a masked TMDB API key;
 - ask for the TMDB metadata language;
 - ask for a destination path;
-- select one or more source folders;
-- select one or more recognized video files;
+- open one unified explorer containing root-level videos and folders with video descendants;
+- expand or collapse folders with `Tab` and select one or more recognized video files with `Space`;
 - search and select a TMDB result;
 - choose movie or series for a manual ID;
 - ask for season and episode values;

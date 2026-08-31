@@ -6,7 +6,7 @@ use std::{
 use crate::{
     domain::{
         DestinationSelection, EpisodeRef, ExecutionReport, IdentificationMethod, MediaType,
-        OperationPlan, SourceFolder, SourceRoot, TmdbItem, TmdbSearchCandidate, VideoFile,
+        OperationPlan, SourceRoot, TmdbItem, TmdbSearchCandidate, VideoFile,
     },
     error::UiResult,
 };
@@ -45,6 +45,31 @@ pub trait InteractiveUi {
 
     /// Renders a stable wizard step indicator.
     fn show_step(&mut self, current: usize, total: usize, label: &str) -> UiResult<()>;
+
+    /// Opens a visual context section for one selected video file.
+    ///
+    /// Every TMDB and episode prompt for that file is rendered after this call and before
+    /// `finish_file_context`, so a user can always tell which file is being processed.
+    fn show_file_context(
+        &mut self,
+        current_file: usize,
+        total_files: usize,
+        file_path: &Path,
+        source_root: &Path,
+    ) -> UiResult<()> {
+        self.show_message(
+            MessageLevel::Info,
+            &format!(
+                "File {current_file}/{total_files}: {}",
+                display_relative_path(file_path, source_root)
+            ),
+        )
+    }
+
+    /// Closes the visual context section for the current selected video file.
+    fn finish_file_context(&mut self) -> UiResult<()> {
+        Ok(())
+    }
 
     /// Asks for a secret without echoing it to the terminal.
     ///
@@ -108,7 +133,7 @@ pub trait InteractiveUi {
         )
     }
 
-    /// Collects the destination path before source-folder discovery begins.
+    /// Collects the destination path before source-root media discovery begins.
     fn ask_destination_path(&mut self) -> UiResult<Option<String>> {
         self.ask_text("Destination folder path", None)
     }
@@ -128,24 +153,11 @@ pub trait InteractiveUi {
         )
     }
 
-    /// Presents direct source folders and returns the explicitly selected positions.
-    fn select_source_folders(
-        &mut self,
-        source_root: &SourceRoot,
-        folders: &[SourceFolder],
-    ) -> UiResult<Option<Vec<usize>>> {
-        let items = folders
-            .iter()
-            .map(|folder| display_relative_path(folder.path(), source_root.path()))
-            .collect::<Vec<_>>();
-        self.select_many("Select source folders", &items, true)
-    }
-
-    /// Presents recursively discovered video files for one source folder and returns positions.
+    /// Presents all recursively discovered videos in one expandable file explorer and returns
+    /// positions into the flat `files` slice.
     fn select_video_files(
         &mut self,
         source_root: &SourceRoot,
-        folder: &SourceFolder,
         files: &[VideoFile],
     ) -> UiResult<Option<Vec<usize>>> {
         let items = files
@@ -157,19 +169,12 @@ pub trait InteractiveUi {
                     .unwrap_or_default();
                 format!(
                     "{}{}",
-                    display_relative_path(file.path(), folder.path()),
+                    display_relative_path(file.path(), source_root.path()),
                     size
                 )
             })
             .collect::<Vec<_>>();
-        self.select_many(
-            &format!(
-                "Select video files in {}",
-                display_relative_path(folder.path(), source_root.path())
-            ),
-            &items,
-            true,
-        )
+        self.select_many("Select video files", &items, true)
     }
 }
 

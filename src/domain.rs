@@ -135,7 +135,7 @@ impl EpisodeRef {
     }
 }
 
-/// The absolute directory from which the process was started and where source folders are found.
+/// The absolute directory from which the process was started and where the media tree is scanned.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceRoot {
     path: PathBuf,
@@ -153,7 +153,11 @@ impl SourceRoot {
     }
 }
 
-/// A direct child directory that can be selected as a source folder.
+/// A real directory retained as an internal source container for selected files.
+///
+/// The interactive workflow no longer asks the user to select source folders. A nested video's
+/// container is its direct child of the source root, while a video directly in the source root is
+/// grouped under the root itself for plan validation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceFolder {
     path: PathBuf,
@@ -230,7 +234,7 @@ impl DestinationSelection {
     }
 }
 
-/// The selected files associated with one source folder.
+/// Selected files associated with one internal source container.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectedSource {
     folder: PathBuf,
@@ -254,7 +258,7 @@ impl SelectedSource {
     }
 }
 
-/// The complete non-mutating filesystem selection returned by Task 03.
+/// The complete non-mutating filesystem selection returned by the media explorer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FilesystemSelection {
     source_root: SourceRoot,

@@ -258,18 +258,39 @@ pub fn discover_video_files(
 ) -> Result<Discovery<VideoFile>, FilesystemError> {
     let mut files = Vec::new();
     let mut warnings = Vec::new();
-    discover_video_files_in_directory(source_folder.path(), true, &mut files, &mut warnings)?;
+    discover_video_files_in_directory(source_folder.path(), true, None, &mut files, &mut warnings)?;
 
-    files.sort_by(|left, right| compare_paths(left.path(), right.path()));
-    warnings.sort_by(|left, right| {
-        compare_paths(left.path(), right.path()).then_with(|| left.reason().cmp(right.reason()))
-    });
+    sort_video_discovery(&mut files, &mut warnings);
+    Ok(Discovery::new(files, warnings))
+}
+
+/// Recursively discovers every regular video file below the current source root.
+///
+/// Unlike [`discover_video_files`], this scan includes videos directly in the source root and
+/// excludes the chosen destination subtree at any depth. The returned files are flat and sorted;
+/// the interactive UI is responsible for presenting them as an expandable tree.
+pub fn discover_video_files_in_source_root(
+    source_root: &SourceRoot,
+    destination: &DestinationSelection,
+) -> Result<Discovery<VideoFile>, FilesystemError> {
+    let mut files = Vec::new();
+    let mut warnings = Vec::new();
+    discover_video_files_in_directory(
+        source_root.path(),
+        true,
+        Some(destination.path()),
+        &mut files,
+        &mut warnings,
+    )?;
+
+    sort_video_discovery(&mut files, &mut warnings);
     Ok(Discovery::new(files, warnings))
 }
 
 fn discover_video_files_in_directory(
     directory: &Path,
     is_root: bool,
+    excluded_directory: Option<&Path>,
     files: &mut Vec<VideoFile>,
     warnings: &mut Vec<DiscoveryWarning>,
 ) -> Result<(), FilesystemError> {
@@ -322,7 +343,12 @@ fn discover_video_files_in_directory(
             continue;
         }
         if file_type.is_dir() {
-            discover_video_files_in_directory(&path, false, files, warnings)?;
+            if excluded_directory.is_some_and(|excluded| {
+                paths_equivalent(&path, excluded) || path_is_same_or_descendant(&path, excluded)
+            }) {
+                continue;
+            }
+            discover_video_files_in_directory(&path, false, excluded_directory, files, warnings)?;
             continue;
         }
         if !file_type.is_file() || !has_video_extension(&path) {
@@ -351,6 +377,13 @@ fn discover_video_files_in_directory(
     }
 
     Ok(())
+}
+
+fn sort_video_discovery(files: &mut [VideoFile], warnings: &mut [DiscoveryWarning]) {
+    files.sort_by(|left, right| compare_paths(left.path(), right.path()));
+    warnings.sort_by(|left, right| {
+        compare_paths(left.path(), right.path()).then_with(|| left.reason().cmp(right.reason()))
+    });
 }
 
 /// Returns whether a path has one of the recognized video filename extensions.
@@ -548,8 +581,14 @@ fn validate_plan_destination(plan: &OperationPlan) -> Result<(), FilesystemError
         {
             continue;
         }
+        let source_folder_is_root =
+            paths_equivalent(operation.source_folder(), plan.source_root().path());
+        // A root-level source video is grouped under the source root for plan validation. A
+        // destination child is safe because discovery excludes the entire destination subtree;
+        // nested source containers still reject an overlapping destination.
         if paths_equivalent(destination_path, operation.source_folder())
-            || path_is_same_or_descendant(destination_path, operation.source_folder())
+            || (!source_folder_is_root
+                && path_is_same_or_descendant(destination_path, operation.source_folder()))
         {
             return Err(FilesystemError::DestinationIsSelectedSource {
                 path: destination_path.to_owned(),
@@ -1371,6 +1410,48 @@ mod tests {
             ]
         );
         assert_eq!(result.items()[0].size_bytes(), Some(5));
+        assert!(result.warnings().is_empty());
+    }
+
+    #[test]
+    fn source_root_video_discovery_includes_root_files_and_excludes_destination_subtrees() {
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("source");
+        let nested = source.join("nested");
+        let destination = directory.path().join("organized");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&nested).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(directory.path().join("root.mp4"), "root").unwrap();
+        fs::write(source.join("movie.mkv"), "movie").unwrap();
+        fs::write(nested.join("episode.webm"), "episode").unwrap();
+        fs::write(destination.join("already-organized.mkv"), "ignored").unwrap();
+        fs::create_dir(destination.join("nested")).unwrap();
+        fs::write(
+            destination.join("nested").join("also-ignored.mp4"),
+            "ignored",
+        )
+        .unwrap();
+
+        let root = source_root(directory.path());
+        let destination = resolve_destination(&root, "organized").unwrap();
+        let result = discover_video_files_in_source_root(&root, &destination).unwrap();
+        let paths: Vec<_> = result
+            .items()
+            .iter()
+            .map(|file| {
+                file.path()
+                    .strip_prefix(directory.path())
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+
+        assert_eq!(
+            paths,
+            vec!["root.mp4", "source/movie.mkv", "source/nested/episode.webm"]
+        );
         assert!(result.warnings().is_empty());
     }
 

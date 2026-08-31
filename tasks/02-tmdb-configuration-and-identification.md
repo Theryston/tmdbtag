@@ -32,7 +32,7 @@ configuration until Tasks 03–05 connect source selection, naming, planning, an
 
 ## Required outcome
 
-During every normal interactive run, after `clap` has handled the command line and before the application asks for the destination or discovers source folders:
+During every normal interactive run, after `clap` has handled the command line and before the application asks for the destination or discovers the source-root media tree:
 
 1. resolve `~/.title-tmdb-file/config.json` in the current user's home directory;
 2. load the optional `tmdb_api_key` and `tmdb_language` fields;
@@ -153,7 +153,7 @@ The title must remain raw metadata at this boundary. Filename normalization belo
 
 Do not implement in this task:
 
-- source-folder or video-file discovery;
+- source-root media discovery or video-file selection;
 - file selection;
 - filename normalization or filename parsing;
 - plan construction or collision handling;
@@ -225,7 +225,7 @@ Cover at least:
 - [x] The language prompt is the next missing-field question when both fields are missing.
 - [x] `TMDB_API_KEY` and `TMDB_LANGUAGE` provide fallback defaults without bypassing required prompts.
 - [x] The initial language default is `pt-BR`.
-- [x] Configuration is validated against TMDB before destination or source-folder discovery.
+- [x] Configuration is validated against TMDB before destination or source-root media discovery.
 - [x] One reusable TMDB client applies authentication, language, timeout, and error policy consistently.
 - [x] Movie and TV searches happen in real time.
 - [x] Search candidates are clearly typed and no result is selected silently.

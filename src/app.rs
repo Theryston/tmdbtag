@@ -1,4 +1,7 @@
-use std::collections::HashSet;
+use std::{
+    collections::HashSet,
+    path::{Component, Path},
+};
 
 use crate::{
     config::{ConfigPromptMode, ConfigStore, StartupConfig, configure_interactively},
@@ -247,7 +250,7 @@ fn collect_filesystem_selection_from_root<U: InteractiveUi>(
     )?;
 
     'destination: loop {
-        ui.show_step(1, 3, "Choose the destination folder")?;
+        ui.show_step(1, 5, "Choose the destination folder")?;
         let Some(raw_destination) = ui.ask_destination_path()? else {
             return Ok(None);
         };
@@ -287,12 +290,12 @@ fn collect_filesystem_selection_from_root<U: InteractiveUi>(
             ),
         )?;
 
-        let folders = filesystem::discover_source_folders(&source_root, &destination)?;
-        show_discovery_warnings(ui, folders.warnings(), source_root.path())?;
-        if folders.items().is_empty() {
+        let videos = filesystem::discover_video_files_in_source_root(&source_root, &destination)?;
+        show_discovery_warnings(ui, videos.warnings(), source_root.path())?;
+        if videos.items().is_empty() {
             ui.show_message(
                 MessageLevel::Warning,
-                "No eligible source folders were found in the current directory.",
+                "No eligible video files were found in the current directory or its subfolders.",
             )?;
             let Some(choose_again) = ui.confirm("Choose a different destination?", true)? else {
                 return Ok(None);
@@ -304,99 +307,37 @@ fn collect_filesystem_selection_from_root<U: InteractiveUi>(
         }
 
         loop {
-            ui.show_step(2, 3, "Select source folders")?;
-            let Some(folder_indices) = ui.select_source_folders(&source_root, folders.items())?
-            else {
+            ui.show_step(2, 5, "Select video files")?;
+            let Some(file_indices) = ui.select_video_files(&source_root, videos.items())? else {
                 return Ok(None);
             };
-            if folder_indices.is_empty() {
+            if file_indices.is_empty() {
                 ui.show_message(
                     MessageLevel::Error,
-                    "Select at least one source folder to continue.",
+                    "Select at least one video file to continue.",
                 )?;
                 continue;
             }
-            validate_selection_indices(&folder_indices, folders.items().len(), "source folder")?;
+            validate_selection_indices(&file_indices, videos.items().len(), "video file")?;
 
-            let mut selected_sources = Vec::with_capacity(folder_indices.len());
-            let mut choose_folders_again = false;
-            let mut sorted_folder_indices = folder_indices;
-            sorted_folder_indices.sort_unstable();
-
-            for folder_index in sorted_folder_indices {
-                let folder = &folders.items()[folder_index];
-                let videos = filesystem::discover_video_files(folder)?;
-                show_discovery_warnings(ui, videos.warnings(), folder.path())?;
-                if videos.items().is_empty() {
-                    ui.show_message(
-                        MessageLevel::Warning,
-                        &format!(
-                            "No eligible video files were found in {} or its subfolders.",
-                            display_relative_path(folder.path(), source_root.path())
-                        ),
-                    )?;
-                    let Some(try_other_folder) =
-                        ui.confirm("Choose source folders again?", true)?
-                    else {
-                        return Ok(None);
-                    };
-                    if try_other_folder {
-                        choose_folders_again = true;
-                        break;
-                    }
-                    return Ok(None);
-                }
-
-                loop {
-                    ui.show_step(
-                        3,
-                        3,
-                        &format!(
-                            "Select videos in {}",
-                            display_relative_path(folder.path(), source_root.path())
-                        ),
-                    )?;
-                    let Some(file_indices) =
-                        ui.select_video_files(&source_root, folder, videos.items())?
-                    else {
-                        return Ok(None);
-                    };
-                    if file_indices.is_empty() {
-                        ui.show_message(
-                            MessageLevel::Error,
-                            &format!(
-                                "Select at least one video file in {} to continue.",
-                                display_relative_path(folder.path(), source_root.path())
-                            ),
-                        )?;
-                        continue;
-                    }
-                    validate_selection_indices(&file_indices, videos.items().len(), "video file")?;
-
-                    let mut sorted_file_indices = file_indices;
-                    sorted_file_indices.sort_unstable();
-                    let files = sorted_file_indices
-                        .into_iter()
-                        .map(|file_index| videos.items()[file_index].path().to_owned())
-                        .collect();
-                    selected_sources.push(SelectedSource::new(folder.path().to_owned(), files));
-                    break;
-                }
-            }
-
-            if choose_folders_again {
-                continue;
-            }
+            let mut sorted_file_indices = file_indices;
+            sorted_file_indices.sort_unstable();
+            let selected_files = sorted_file_indices
+                .into_iter()
+                .map(|file_index| videos.items()[file_index].path().to_owned())
+                .collect::<Vec<_>>();
+            let selected_sources = build_selected_sources(&source_root, selected_files);
 
             let selected_folders = selected_sources
                 .iter()
+                .filter(|source| source.folder() != source_root.path())
                 .map(|source| SourceFolder::new(source.folder().to_owned()))
                 .collect::<Vec<_>>();
             if let Err(error) =
                 filesystem::validate_destination_against_sources(&destination, &selected_folders)
             {
                 ui.show_message(MessageLevel::Error, &error.to_string())?;
-                let Some(try_again) = ui.confirm("Choose source folders again?", true)? else {
+                let Some(try_again) = ui.confirm("Choose video files again?", true)? else {
                     return Ok(None);
                 };
                 if try_again {
@@ -411,6 +352,38 @@ fn collect_filesystem_selection_from_root<U: InteractiveUi>(
                 selected_sources,
             )));
         }
+    }
+}
+
+fn build_selected_sources(
+    source_root: &SourceRoot,
+    selected_files: Vec<std::path::PathBuf>,
+) -> Vec<SelectedSource> {
+    selected_files
+        .into_iter()
+        .map(|file| {
+            let source_folder = source_container_for_file(source_root, &file);
+            SelectedSource::new(source_folder, vec![file])
+        })
+        .collect()
+}
+
+fn source_container_for_file(source_root: &SourceRoot, file: &Path) -> std::path::PathBuf {
+    let Some(relative) = file.strip_prefix(source_root.path()).ok() else {
+        return source_root.path().to_owned();
+    };
+
+    let mut components = relative.components();
+    let Some(first) = components.next() else {
+        return source_root.path().to_owned();
+    };
+    if components.next().is_none() {
+        return source_root.path().to_owned();
+    }
+
+    match first {
+        Component::Normal(name) => source_root.path().join(name),
+        _ => source_root.path().to_owned(),
     }
 }
 
@@ -460,7 +433,7 @@ where
     U: InteractiveUi + TmdbInteraction,
     C: TmdbProvider,
 {
-    ui.show_step(4, 6, "Identify media and validate episodes")?;
+    ui.show_step(3, 5, "Identify media and validate episodes")?;
     let Some(plan) = build_operation_plan(ui, selection, client)? else {
         ui.show_message(
             MessageLevel::Info,
@@ -469,7 +442,7 @@ where
         return Ok(RunOutcome::Cancelled);
     };
 
-    ui.show_step(5, 6, "Review and validate the operation plan")?;
+    ui.show_step(4, 5, "Review and validate the operation plan")?;
     filesystem::validate_move_plan(&plan)?;
     ui.show_plan_preview(&plan)?;
 
@@ -492,7 +465,7 @@ where
         return Ok(RunOutcome::Cancelled);
     }
 
-    ui.show_step(6, 6, "Move and rename files")?;
+    ui.show_step(5, 5, "Move and rename files")?;
     let activity = ui.start_activity("Moving and renaming files...")?;
     let total = plan.operation_count();
     let source_root = plan.source_root().path();
@@ -535,6 +508,12 @@ where
 {
     let mut operations = Vec::new();
     let mut episode_keys = HashSet::new();
+    let total_files = selection
+        .sources()
+        .iter()
+        .map(|source| source.files().len())
+        .sum::<usize>();
+    let mut current_file = 0;
 
     for source in selection.sources() {
         if source.files().is_empty() {
@@ -545,47 +524,27 @@ where
         }
 
         for source_path in source.files() {
-            let Some(item) = identify_tmdb_item(ui, client)? else {
-                return Ok(None);
-            };
-
-            let episode = match item.media_type {
-                crate::domain::MediaType::Movie => None,
-                crate::domain::MediaType::Series => {
-                    let file_label =
-                        display_relative_path(source_path, selection.source_root().path());
-                    let episode = loop {
-                        let Some(episode) =
-                            collect_series_episode(ui, client, item.id, &file_label)?
-                        else {
-                            return Ok(None);
-                        };
-                        let key = (item.id, episode);
-                        if episode_keys.insert(key) {
-                            break episode;
-                        }
-
-                        ui.show_message(
-                            MessageLevel::Error,
-                            &format!(
-                                "Series {} episode S{:02}E{:02} was already assigned. Enter a different episode.",
-                                item.id,
-                                episode.season(),
-                                episode.episode()
-                            ),
-                        )?;
-                    };
-                    Some(episode)
-                }
-            };
-
-            operations.push(build_planned_operation(
+            current_file += 1;
+            ui.show_file_context(
+                current_file,
+                total_files,
+                source_path,
+                selection.source_root().path(),
+            )?;
+            let operation = build_selected_file_operation(
+                ui,
                 source,
                 source_path,
                 selection.destination().path(),
-                item,
-                episode,
-            )?);
+                selection.source_root().path(),
+                client,
+                &mut episode_keys,
+            );
+            ui.finish_file_context()?;
+            let Some(operation) = operation? else {
+                return Ok(None);
+            };
+            operations.push(operation);
         }
     }
 
@@ -598,6 +557,60 @@ where
         selection.destination().clone(),
         operations,
     )))
+}
+
+fn build_selected_file_operation<U, C>(
+    ui: &mut U,
+    source: &SelectedSource,
+    source_path: &std::path::Path,
+    destination: &std::path::Path,
+    source_root: &std::path::Path,
+    client: &C,
+    episode_keys: &mut HashSet<(TmdbId, EpisodeRef)>,
+) -> AppResult<Option<PlannedOperation>>
+where
+    U: InteractiveUi + TmdbInteraction,
+    C: TmdbProvider,
+{
+    let Some(item) = identify_tmdb_item(ui, client)? else {
+        return Ok(None);
+    };
+
+    let episode = match item.media_type {
+        crate::domain::MediaType::Movie => None,
+        crate::domain::MediaType::Series => {
+            let file_label = display_relative_path(source_path, source_root);
+            let episode = loop {
+                let Some(episode) = collect_series_episode(ui, client, item.id, &file_label)?
+                else {
+                    return Ok(None);
+                };
+                let key = (item.id, episode);
+                if episode_keys.insert(key) {
+                    break episode;
+                }
+
+                ui.show_message(
+                    MessageLevel::Error,
+                    &format!(
+                        "Series {} episode S{:02}E{:02} was already assigned. Enter a different episode.",
+                        item.id,
+                        episode.season(),
+                        episode.episode()
+                    ),
+                )?;
+            };
+            Some(episode)
+        }
+    };
+
+    Ok(Some(build_planned_operation(
+        source,
+        source_path,
+        destination,
+        item,
+        episode,
+    )?))
 }
 
 fn build_planned_operation(
@@ -899,6 +912,25 @@ mod tests {
 
         fn show_step(&mut self, current: usize, total: usize, label: &str) -> UiResult<()> {
             self.events.push(format!("step:{current}/{total}:{label}"));
+            Ok(())
+        }
+
+        fn show_file_context(
+            &mut self,
+            current_file: usize,
+            total_files: usize,
+            file_path: &std::path::Path,
+            source_root: &std::path::Path,
+        ) -> UiResult<()> {
+            self.events.push(format!(
+                "file:{current_file}/{total_files}:{}",
+                display_relative_path(file_path, source_root)
+            ));
+            Ok(())
+        }
+
+        fn finish_file_context(&mut self) -> UiResult<()> {
+            self.events.push("file-end".to_owned());
             Ok(())
         }
 
@@ -1392,6 +1424,23 @@ mod tests {
         );
         assert!(ui.events.iter().any(|event| event == "preview:2"));
         assert!(ui.events.iter().any(|event| event == "report:2:0:0"));
+        let first_context = ui
+            .events
+            .iter()
+            .position(|event| event == "file:1/2:movies/first.mkv")
+            .unwrap();
+        let first_context_end = ui
+            .events
+            .iter()
+            .position(|event| event == "file-end")
+            .unwrap();
+        let second_context = ui
+            .events
+            .iter()
+            .position(|event| event == "file:2/2:movies/second.mkv")
+            .unwrap();
+        assert!(first_context < first_context_end);
+        assert!(first_context_end < second_context);
     }
 
     #[test]
@@ -1718,11 +1767,12 @@ mod tests {
     }
 
     #[test]
-    fn filesystem_selection_preserves_folder_associations_and_deterministic_file_order() {
+    fn filesystem_selection_uses_one_explorer_and_preserves_deterministic_file_order() {
         let directory = tempdir().unwrap();
         let alpha = directory.path().join("alpha");
         let beta = directory.path().join("Beta");
         let destination = directory.path().join("organized");
+        let root_video = directory.path().join("root-video.mp4");
         fs::create_dir(&alpha).unwrap();
         fs::create_dir(&beta).unwrap();
         fs::create_dir(&destination).unwrap();
@@ -1735,10 +1785,11 @@ mod tests {
         fs::create_dir(alpha_nested.parent().unwrap()).unwrap();
         fs::write(&alpha_nested, "nested").unwrap();
         fs::write(&beta_episode, "episode").unwrap();
+        fs::write(&root_video, "root").unwrap();
 
         let mut ui = RecordingUi {
             destination_input: Some("organized".to_owned()),
-            select_many_responses: vec![Some(vec![1, 0]), Some(vec![2, 1, 0]), Some(vec![0])],
+            select_many_responses: vec![Some(vec![4, 3, 2, 1, 0])],
             ..RecordingUi::default()
         };
         let selection = collect_filesystem_selection_from_root(
@@ -1750,38 +1801,35 @@ mod tests {
 
         assert_eq!(selection.source_root().path(), directory.path());
         assert_eq!(selection.destination().path(), destination);
-        assert_eq!(selection.sources().len(), 2);
-        assert_eq!(selection.sources()[0].folder(), alpha);
+        assert_eq!(selection.sources().len(), 5);
+        let selected_files = selection
+            .sources()
+            .iter()
+            .flat_map(|source| source.files().iter())
+            .collect::<Vec<_>>();
         assert_eq!(
-            selection.sources()[0].files(),
-            &[
-                alpha_first.clone(),
-                alpha_nested.clone(),
-                alpha_second.clone(),
+            selected_files,
+            vec![
+                &alpha_first,
+                &alpha_nested,
+                &alpha_second,
+                &beta_episode,
+                &root_video
             ]
         );
-        assert_eq!(selection.sources()[1].folder(), beta);
-        assert_eq!(
-            selection.sources()[1].files(),
-            std::slice::from_ref(&beta_episode)
-        );
+        assert_eq!(selection.sources()[0].folder(), alpha);
+        assert_eq!(selection.sources()[3].folder(), beta);
+        assert_eq!(selection.sources()[4].folder(), directory.path());
         assert!(destination.is_dir());
+        assert!(root_video.is_file());
         assert!(alpha_first.is_file());
         assert!(alpha_nested.is_file());
         assert!(alpha_second.is_file());
         assert!(beta_episode.is_file());
-        assert!(
-            ui.events
-                .iter()
-                .any(|event| event == "many:Select source folders:alpha|Beta")
-        );
-        assert!(ui.events.iter().any(|event| event
-            == "many:Select video files in alpha:first.mkv · 5 B|season-01/episode.mp4 · 6 B|second.MKV · 6 B"));
-        assert!(
-            ui.events
-                .iter()
-                .any(|event| event == "many:Select video files in Beta:episode.mkv · 7 B")
-        );
+        assert!(ui.events.iter().any(|event| {
+            event
+                == "many:Select video files:alpha/first.mkv · 5 B|alpha/season-01/episode.mp4 · 6 B|alpha/second.MKV · 6 B|Beta/episode.mkv · 7 B|root-video.mp4 · 4 B"
+        }));
         let absolute_root = directory.path().to_string_lossy();
         assert!(
             !ui.events
@@ -1815,7 +1863,7 @@ mod tests {
     }
 
     #[test]
-    fn a_source_folder_without_videos_can_be_declined_without_mutation() {
+    fn no_video_files_can_be_declined_without_mutation() {
         let directory = tempdir().unwrap();
         let source = directory.path().join("empty-source");
         let destination = directory.path().join("organized");
@@ -1824,7 +1872,6 @@ mod tests {
 
         let mut ui = RecordingUi {
             destination_input: Some("organized".to_owned()),
-            select_many_responses: vec![Some(vec![0])],
             confirm_responses: vec![Some(false)],
             ..RecordingUi::default()
         };

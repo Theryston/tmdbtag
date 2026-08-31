@@ -82,7 +82,9 @@ README.md is the authoritative product specification. The following rules are re
 
 ### Startup configuration
 
-The normal interactive run has a mandatory startup configuration stage before any destination or source-folder discovery. The stage is backed by the per-user file `~/.title-tmdb-file/config.json` (or the equivalent current-user home path on Windows).
+The normal interactive run has a mandatory startup configuration stage before any destination or
+media discovery. The stage is backed by the per-user file `~/.title-tmdb-file/config.json` (or the
+equivalent current-user home path on Windows).
 
 Required order:
 
@@ -91,7 +93,7 @@ Required order:
 3. prompt for the TMDB metadata language only when that field is missing or invalid;
 4. validate the resulting local configuration;
 5. persist a complete configuration when a missing value was collected;
-6. continue to current-directory, destination, and source discovery only after configuration succeeds.
+6. continue to current-directory, destination, and media discovery only after configuration succeeds.
 
 Rules:
 
@@ -113,40 +115,44 @@ Rules:
 - The application uses the process current working directory as the source root.
 - The executable's directory is not automatically the source root.
 - Before filesystem discovery, the application must load a complete TMDB configuration and collect only missing or invalid fields.
-- The destination folder is requested after startup configuration and before source folders are listed.
+- The destination folder is requested after startup configuration and before the media tree is scanned.
 - Destination paths may be absolute or relative to the current working directory.
 - A destination that does not exist may be created only after explicit user confirmation.
 - The current directory itself cannot be the destination.
-- A selected source folder cannot also be the destination.
-- If the destination is inside the current directory, it must not appear as a source option.
+- A destination cannot overlap a selected nested source container.
+- If the destination is inside the current directory, its complete subtree must be excluded from
+  media discovery before the unified explorer is built.
+- A destination child is allowed when the selected source file is directly in the current source
+  root; the root-level file is grouped under the root only for internal plan validation.
 
 ### Folder and file discovery
 
-- Source folders are direct child directories of the current working directory.
-- The MVP does not recursively select nested source folders.
-- Video files are regular files discovered recursively inside each selected source folder and its
-  real subdirectories.
+- The application performs one recursive video discovery from the current working directory.
+- Video files directly in the current directory and in all real subdirectories are eligible.
+- The interactive UI exposes one unified expandable explorer; there is no source-folder selection
+  followed by one file selector per folder.
+- Folder rows exist only when they contain at least one eligible video descendant.
 - The MVP recognizes common video extensions through the centralized case-insensitive
   `VIDEO_EXTENSIONS` allowlist; it is not limited to `.mkv`.
-- Nested directories are searched for video files, but are never themselves source-folder choices
-  and are never selected as files.
+- Nested directories are containers in the explorer, never selectable media items.
 - Symbolic links must not be followed in the MVP.
 - Discovery and display order must be deterministic by relative path.
-- Filesystem paths shown by the interactive UI must be relative: source folders are relative to the
-  current source root, and video files are relative to their selected source folder. Exact paths
-  remain owned `PathBuf` values inside the application.
-- The user must explicitly select folders and files; the first item must never be selected silently.
+- Filesystem paths shown by the interactive UI must be relative to the current source root. Exact
+  paths remain owned `PathBuf` values inside the application.
+- All folders start collapsed. `Tab` expands or collapses the highlighted folder, `Space` selects
+  or deselects a video, and `Enter` confirms the complete selected-file array.
+- The user must explicitly select files; the first file must never be selected silently.
 
 ### Unit of work
 
-Each selected video file is an independent TMDB identification and planning unit. A source folder
-is retained as selection and display context, but it does not determine the metadata for every file
-inside it.
+Each selected video file is an independent TMDB identification and planning unit. The explorer's
+folder hierarchy is display context, while the application retains an internal source-container
+association for safe plan validation; it does not determine the metadata for every file inside it.
 
 - Run the complete identification loop for every selected video file.
 - A movie file creates one operation without an episode reference.
 - A series file creates one operation after its season and episode are validated through TMDB.
-- Multiple files in one source folder may represent different movies, different series, or multiple
+- Multiple files in one directory tree may represent different movies, different series, or multiple
   episodes of the same series.
 - Do not reuse a previous file's TMDB item automatically, even when adjacent files look related.
 
@@ -516,8 +522,8 @@ It should coordinate:
 2. TMDB configuration validation;
 3. current-directory discovery;
 4. destination selection;
-5. source-folder selection;
-6. per-folder video selection;
+5. one recursive video discovery from the current directory with destination-subtree exclusion;
+6. one unified expandable video-file selection;
 7. TMDB identification;
 8. series episode input;
 9. plan construction;
@@ -556,7 +562,7 @@ The CLI layer must not:
 - silently choose a search result;
 - log credentials.
 
-The `config` subcommand must not start source-folder discovery or any media operation. `--help`,
+The `config` subcommand must not start media discovery or any media operation. `--help`,
 `--version`, and `config --help` must be handled by clap before configuration files, credentials,
 the network, or media directories are accessed.
 
@@ -684,13 +690,14 @@ It should provide focused operations such as:
 
 - resolve and validate the process current directory as a `SourceRoot`;
 - resolve absolute and current-directory-relative destinations without creating them;
-- discover direct source folders;
-- recursively discover regular files with recognized video extensions inside a selected source folder;
+- recursively discover regular files with recognized video extensions from the current source root;
+- include videos directly in the source root and recurse through all real subdirectories;
+- exclude the destination directory and all of its descendants at any depth;
 - skip symbolic links and report nested-directory discovery warnings without following links;
 - normalize and compare paths;
 - exclude destinations and overlapping source paths;
 - return typed discovery values and non-fatal discovery warnings;
-- validate the selected folder/file association;
+- retain exact source paths for the UI's unified explorer and later plan revalidation;
 - validate a plan;
 - execute a safe same-volume move;
 - execute a safe cross-volume move;
@@ -794,7 +801,7 @@ The following invariants must be enforced by code, not left as comments.
 - Every selected source path is a regular file.
 - Every selected source file has a case-insensitive extension in the centralized video-extension
   allowlist.
-- Every selected source file belongs to one selected source folder.
+- Every selected source file belongs to one internal source container derived from its exact path.
 - No source file appears more than once in a plan.
 - Every selected source file has exactly one confirmed TMDB item.
 - A movie operation has no episode reference.
@@ -805,7 +812,8 @@ The following invariants must be enforced by code, not left as comments.
 
 - The destination is a directory or a validated directory that can be created after confirmation.
 - The destination is not the current source root.
-- The destination is not one of the selected source folders.
+- The destination does not overlap a selected nested source container. The source root may contain a
+  destination child when selected files are directly in the root and that subtree was excluded.
 - Every generated destination is a direct child of the destination folder in the MVP.
 - A title cannot inject a path separator or escape the destination folder.
 
@@ -969,8 +977,9 @@ For a normal interactive invocation, the exact high-level order is:
 6. the application saves a complete configuration when missing fields were collected;
 7. the application obtains and validates the current working directory;
 8. the UI asks for the destination;
-9. the UI lists and selects source folders;
-10. the UI recursively lists and selects recognized video files for each folder;
+9. the filesystem layer recursively discovers recognized videos from the current directory and
+   excludes the destination subtree;
+10. the UI presents one collapsed-by-default expandable explorer and collects selected video files;
 11. the UI runs the identification loop for every selected video file;
 12. the UI collects season and episode for each file identified as a series;
 13. the application builds and validates the complete plan;
@@ -979,7 +988,7 @@ For a normal interactive invocation, the exact high-level order is:
 16. the executor performs the approved plan and the UI shows the final report.
 
 When both configuration fields are missing, the API-key and language questions happen in that order
-before destination, source-folder, or video-file discovery. If the configuration file is complete,
+before destination or media discovery. If the configuration file is complete,
 neither question is shown. The `config` command follows a separate, explicit order: clap parses the
 command, the UI opens both shared configuration prompts, the application validates and saves them,
 and the command exits without discovering or moving media. The only earlier user-visible paths are
@@ -999,13 +1008,9 @@ trait InteractiveUi {
         default_language: &str,
     ) -> Result<String, UiError>;
     fn ask_destination(&mut self, initial: &Path) -> Result<PathBuf, UiError>;
-    fn select_source_folders(
-        &mut self,
-        folders: &[SourceFolder],
-    ) -> Result<Vec<usize>, UiError>;
     fn select_video_files(
         &mut self,
-        folder: &SourceFolder,
+        source_root: &SourceRoot,
         files: &[VideoFile],
     ) -> Result<Vec<usize>, UiError>;
     // Additional operations for search, episode input, preview,
@@ -1021,11 +1026,25 @@ The exact trait shape is not prescribed. The separation is required:
 - domain rules belong to domain modules;
 - filesystem mutation belongs to filesystem.rs.
 
-Filesystem paths shown by the interactive UI must be relative display values. Show source-folder
-choices relative to the current source root, show video-file choices relative to their selected
-source folder, and show preview source/destination values relative to the current source root.
-Relative labels are presentation-only; never reconstruct an execution path from them, and never
-discard the exact `PathBuf` retained by discovery and planning.
+Filesystem paths shown by the interactive UI must be relative display values. Show every explorer
+row relative to the current source root and show preview source/destination values relative to that
+same root. Relative labels are presentation-only; never reconstruct an execution path from them,
+and never discard the exact `PathBuf` retained by discovery and planning.
+
+The video selector is one unified explorer, not a sequence of folder and per-folder file prompts.
+It must show root-level videos and folders that contain videos, start folders collapsed, support
+arrow-key navigation, use `Space` only for video selection, use `Tab` to expand or collapse the
+highlighted folder, and use `Enter` to return one flat array of selected file positions. A folder
+may be expanded without selecting any of its descendants.
+
+During per-file identification, the UI must open a bounded visual context before the first TMDB
+prompt for that file and close it only after identification, episode validation, or cancellation
+has finished. The context must show the file position in the batch and its relative path. Long
+paths must be truncated without splitting UTF-8 text, preferably from the left so the filename
+suffix remains visible. Every TMDB search, result selection, detail confirmation, episode prompt,
+validation message, and related progress status for that file must remain visibly associated with
+the open context. A context must never cause the application to replace the exact source `PathBuf`
+with its truncated display label.
 
 ### Modern terminal quality bar
 
@@ -1039,6 +1058,9 @@ Provide, where supported by the selected terminal UI library:
 - keyboard navigation;
 - obvious selected/unselected states;
 - searchable or filterable long lists;
+- a bounded context box for every selected video file, showing its relative path and file position;
+- left-truncation of long context paths so the filename suffix remains visible;
+- grouping of every TMDB and series episode prompt/status for a file inside that file's context;
 - clear selection counts;
 - aligned source/destination preview tables;
 - distinct success, warning, error, and informational styles;
@@ -1091,11 +1113,13 @@ During execution:
 - Show the current destination while building the plan.
 - Show the media type clearly.
 - Show the full source-to-destination mapping in the preview.
-- Render filesystem paths as relative display paths: source folders relative to the source root,
-  nested video files relative to their selected source folder, and preview entries relative to the
-  source root. Keep exact paths in the plan for execution.
+- Render filesystem paths as relative display paths: every explorer row and preview entry is
+  relative to the current source root. Keep exact paths in the plan for execution.
 - Do not communicate safety-critical information by color alone.
-- Keep paths readable; allow wrapping or scrolling for long paths.
+- Keep paths readable; truncate long explorer labels safely while preserving the filename suffix,
+  and allow scrolling through the visible tree when necessary.
+- Show folder expand/collapse state and the keyboard controls for navigation, selection, and
+  confirmation.
 - Show a useful progress indicator for large files or batches.
 - Do not print raw JSON in normal operation.
 - Do not display API keys, authorization headers, or request URLs containing credentials.
@@ -1117,9 +1141,11 @@ For every discovered entry:
 - preserve the actual path for later revalidation;
 - sort before returning results.
 
-Source-folder discovery is intentionally direct-child-only. Video-file discovery is a separate,
-intentional recursive walk inside each already selected source folder. Do not broaden the former
-while implementing the latter, and do not follow symbolic links in either walk.
+The primary media discovery is one recursive walk rooted at the current directory. It includes
+root-level videos, creates no UI-specific tree state, and excludes the configured destination
+subtree. The terminal layer may build a presentation tree from the returned flat paths, but the
+filesystem layer remains responsible for the authoritative discovery, sorting, and safety checks.
+Do not follow symbolic links.
 
 ### Path comparison
 
@@ -1372,10 +1398,12 @@ Unit tests should not need a real network or a real terminal.
 
 Use temporary directories for:
 
-- direct-folder discovery;
-- recursive recognized-video discovery inside selected folders;
+- unified source-root discovery including root-level and recursively nested videos;
+- destination-subtree exclusion at any depth;
+- collapsed and explicitly expanded explorer tree construction;
+- deterministic relative-path explorer ordering;
 - case-insensitive extension handling;
-- relative-path display labels for source and preview entries;
+- relative-path display labels for explorer and preview entries;
 - symbolic-link exclusion where supported;
 - destination exclusion;
 - destination creation after confirmation;
@@ -1421,9 +1449,9 @@ Cover at least:
 
 - one movie file;
 - multiple series episodes;
-- multiple source folders;
+- root-level and nested videos selected from one explorer;
 - cancellation at each pre-commit stage;
-- movie selection with multiple files rejected;
+- multiple selected files each receive an independent identification loop;
 - invalid episode corrected;
 - duplicate episode rejected;
 - search result explicitly selected;
@@ -1744,9 +1772,8 @@ This step should not need a network or terminal.
 
 - discover the current directory;
 - resolve the destination without creating it prematurely;
-- list direct source folders;
-- exclude the destination;
-- recursively list regular files with recognized video extensions inside selected folders;
+- recursively discover root-level and nested regular files with recognized video extensions;
+- exclude the destination subtree at every depth;
 - sort deterministically;
 - test with temporary directories.
 
@@ -1860,7 +1887,7 @@ Do not:
 - concatenate filesystem paths as strings;
 - assume all filenames are UTF-8;
 - follow symbolic links by accident;
-- walk recursively when the product says direct children only;
+- broaden a traversal beyond the source-root scope defined by the product;
 - add random or timestamped suffixes to resolve collisions;
 - log raw request headers or API responses containing secrets;
 - swallow errors and continue with an incomplete plan;
@@ -1893,9 +1920,9 @@ Before handing off any implementation change, verify:
 - [ ] I verified that the `config` command reuses the normal configuration prompt and persistence code.
 - [ ] I kept UI, domain, TMDB, naming, and filesystem responsibilities separated.
 - [ ] I used typed values and errors at important boundaries.
-- [ ] I preserved the one-item-per-source-folder rule.
-- [ ] I preserved direct source-folder discovery plus recursive recognized-video discovery within
-      each selected folder.
+- [ ] I preserved independent per-file identification within the unified explorer.
+- [ ] I verified one recursive source-root discovery pass, including root-level videos, nested
+      videos, and destination-subtree exclusion.
 - [ ] I verified that filesystem paths shown by the UI are relative while exact paths remain in
       typed internal values.
 - [ ] I preserved the documented filename format.
