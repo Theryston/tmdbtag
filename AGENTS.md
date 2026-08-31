@@ -57,15 +57,19 @@ title-tmdb-file/
     ├── config.rs
     ├── domain.rs
     ├── error.rs
-    └── ui.rs
+    ├── ui.rs
+    └── tmdb/
+        ├── mod.rs
+        ├── client.rs
+        └── models.rs
 ~~~
 
-The remaining media-organization workflow is still a placeholder. Do not describe TMDB verification, filesystem discovery, naming, planning, or movement as already available.
+The remaining media-organization workflow is still a placeholder. Do not describe filesystem discovery, naming, planning, or movement as already available.
 
 The CLI foundation is now implemented: command parsing, interactive terminal contracts, per-user
-configuration persistence, the shared configuration wizard, and local configuration validation are
-available. TMDB verification, filesystem discovery, naming, planning, and movement are still
-unimplemented until their respective tasks are completed.
+configuration persistence, the shared configuration wizard, local configuration validation, the
+reusable TMDB client, and the TMDB identification boundary are available. Filesystem discovery,
+naming, planning, and movement are still unimplemented until their respective tasks are completed.
 
 The repository is a binary application, not a library product at this stage. Nevertheless, the core logic must be structured so it can be tested without driving a real terminal or contacting the real TMDB service.
 
@@ -447,7 +451,7 @@ Before adding a dependency:
 
 clap is a required dependency, but its exact version must still be selected according to the project's supported Rust toolchain. The interactive prompt/rendering library is a separate dependency and must be evaluated for keyboard navigation, multiple selection, search, styling, terminal fallback, maintenance, and platform support. Do not invent a package name or put an unverified crate into Cargo.toml.
 
-Task 01 selected `clap` for command parsing, `dialoguer` for interactive prompts and keyboard selection, `indicatif` for spinner/progress feedback, and `thiserror` for typed errors. The configuration follow-up adds `serde` and `serde_json` for the documented per-user JSON file and `tempfile` as a test-only dependency for isolated configuration tests. These dependencies must remain behind the appropriate boundaries. The current dialoguer adapter provides searchable selection by filtering long lists before handing the visible options to its selection controls; callers must not depend on dialoguer types directly.
+Task 01 selected `clap` for command parsing, `dialoguer` for interactive prompts and keyboard selection, `indicatif` for spinner/progress feedback, and `thiserror` for typed errors. The configuration and TMDB follow-up adds `serde` and `serde_json` for the documented per-user JSON file and API mappings, `reqwest` with Rustls for bounded HTTPS requests, and `tempfile` as a test-only dependency for isolated configuration tests. These dependencies must remain behind the appropriate boundaries. The current dialoguer adapter provides searchable selection by filtering long lists before handing the visible options to its selection controls; callers must not depend on dialoguer types directly. TMDB client tests use a local standard-library loopback server, so they do not require live credentials or network data.
 
 For a binary application, Cargo.lock should be generated and versioned once dependencies are introduced, unless the repository's explicit policy changes.
 
@@ -627,6 +631,7 @@ At minimum, distinguish:
 - invalid user input;
 - TMDB authentication failure;
 - TMDB item-not-found;
+- TMDB media-type mismatch;
 - TMDB rate limit;
 - TMDB server/network/timeout failure;
 - invalid TMDB response;
@@ -820,6 +825,7 @@ owner-only permissions where supported.
 Use the endpoints defined by README.md:
 
 ~~~text
+GET /3/configuration
 GET /3/search/movie
 GET /3/search/tv
 GET /3/movie/{movie_id}

@@ -1,6 +1,9 @@
 use std::fmt;
 
-use crate::error::UiResult;
+use crate::{
+    domain::{EpisodeRef, IdentificationMethod, MediaType, TmdbItem, TmdbSearchCandidate},
+    error::UiResult,
+};
 
 /// The severity of an application-owned terminal message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,4 +77,36 @@ pub trait InteractiveUi {
 
     /// Starts a spinner/progress activity for a potentially slow operation.
     fn start_activity(&mut self, message: &str) -> UiResult<Box<dyn ProgressOutput>>;
+}
+
+/// TMDB-specific interaction contract used by the identification workflow.
+///
+/// Keeping these operations separate from the generic selection contract lets the application
+/// orchestrate TMDB without importing dialoguer types, while the concrete terminal adapter owns
+/// result formatting, numeric text collection, and confirmation wording.
+pub trait TmdbInteraction {
+    /// Asks whether the user wants text search or manual ID identification.
+    fn choose_identification_method(&mut self) -> UiResult<Option<IdentificationMethod>>;
+
+    /// Asks which TMDB namespace a manually entered ID belongs to.
+    fn choose_media_type(&mut self) -> UiResult<Option<MediaType>>;
+
+    /// Collects a non-empty search query.
+    fn ask_search_query(&mut self) -> UiResult<Option<String>>;
+
+    /// Displays typed TMDB candidates and returns the selected candidate position.
+    fn select_tmdb_result(&mut self, candidates: &[TmdbSearchCandidate])
+    -> UiResult<Option<usize>>;
+
+    /// Collects a raw ID string so the application can validate it at the domain boundary.
+    fn ask_tmdb_id(&mut self) -> UiResult<Option<String>>;
+
+    /// Shows verified details and asks for explicit identification confirmation.
+    fn confirm_tmdb_item(&mut self, item: &TmdbItem) -> UiResult<Option<bool>>;
+
+    /// Collects raw season and episode strings for a selected series file.
+    fn ask_episode_numbers(&mut self, file_label: &str) -> UiResult<Option<(String, String)>>;
+
+    /// Displays a verified episode result without using its title for naming.
+    fn show_verified_episode(&mut self, episode: &EpisodeRef) -> UiResult<()>;
 }

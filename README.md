@@ -2,7 +2,7 @@
 
 Modern, polished, and highly interactive CLI for organizing .mkv video files using the identifier and title registered in [The Movie Database (TMDB)](https://www.themoviedb.org/).
 
-> Status: MVP in progress. The CLI foundation and persisted startup-configuration foundation are implemented. TMDB verification, filesystem discovery, naming, planning, and file movement remain for the following tasks.
+> Status: MVP in progress. The CLI foundation, persisted startup configuration, and TMDB identification boundary are implemented. Filesystem discovery, naming, planning, and file movement remain for the following tasks.
 
 This README is the source of truth for the expected behavior. Any implementation, flow change, or new feature must be compared against this document before it is incorporated.
 
@@ -245,7 +245,7 @@ Rules for the API-key prompt:
 
 Rules for the language prompt:
 
-- show a searchable list of common TMDB language/locale codes;
+- use an editable locale field with common examples such as `pt-BR` and `en-US`;
 - allow a supported code to be entered manually when needed;
 - use `pt-BR` as the initial default;
 - use the saved language before considering `TMDB_LANGUAGE` as a default;
@@ -683,14 +683,15 @@ include the key in diagnostics, or commit the file to the repository. A malforme
 normal workflow with an actionable error; `title-tmdb-file config` may replace it after the user
 explicitly completes the configuration prompts.
 
-### Planned endpoints
+### TMDB endpoints
 
 The integration must use the TMDB v3 API with the user-selected language and include_adult=false for searches. The initial default is pt-BR.
 
 Required operations:
 
-| Operation | Planned endpoint | Purpose |
+| Operation | Endpoint | Purpose |
 | --- | --- | --- |
+| Validate credentials | GET /3/configuration | Verify the configured API key before media discovery. |
 | Search movies | GET /3/search/movie | Find movie candidates. |
 | Search series | GET /3/search/tv | Find TV series candidates. |
 | Movie details | GET /3/movie/{movie_id} | Confirm the ID and obtain the final title. |
@@ -866,7 +867,11 @@ title-tmdb-file/
     ├── config.rs
     ├── domain.rs
     ├── error.rs
-    └── ui.rs
+    ├── ui.rs
+    └── tmdb/
+        ├── mod.rs
+        ├── client.rs
+        └── models.rs
 ~~~
 
 ### Suggested target structure
@@ -905,7 +910,7 @@ title-tmdb-file/
     └── fixtures/
 ~~~
 
-Task 01 currently implements `clap` for command parsing, `dialoguer` for password/text/select/multi-select controls, and `indicatif` for activity feedback. These libraries are implementation details behind the CLI/UI boundary and may be replaced only after the interaction contract and user experience are preserved.
+Task 01 and Task 02 currently implement `clap` for command parsing, `dialoguer` for password/text/select/multi-select controls, `indicatif` for activity feedback, `reqwest` with Rustls for bounded HTTPS requests, and `serde`/`serde_json` for the documented configuration and TMDB response mappings. These libraries are implementation details behind the CLI/UI/TMDB boundaries and may be replaced only after the interaction contract, safety guarantees, and user experience are preserved.
 
 This is a suggested organization, not a requirement to create every file immediately. The important rule is to keep the UI, TMDB, filesystem, and filename-composition concerns decoupled.
 
@@ -992,16 +997,16 @@ A detailed error backtrace may be enabled during development, but normal output 
 
 The MVP is complete only when all of the following criteria are met:
 
-- [ ] Use clap for command-line parsing, --help, --version, and argument diagnostics.
-- [ ] Keep all application-owned code and user-facing text in English.
-- [ ] Provide a polished, keyboard-friendly, searchable, and responsive interactive terminal experience.
-- [ ] Load `~/.title-tmdb-file/config.json` before the normal interactive workflow.
-- [ ] Ask for the TMDB API key first only when the saved API key is missing or invalid.
-- [ ] Ask for the TMDB metadata language next only when the saved language is missing or invalid.
-- [ ] Skip both startup prompts when both saved fields are valid.
-- [ ] Persist a complete configuration without exposing the API key in application output.
-- [ ] Provide `title-tmdb-file config` to deliberately edit and save both fields.
-- [ ] Validate the API key and language before filesystem discovery.
+- [x] Use clap for command-line parsing, --help, --version, and argument diagnostics.
+- [x] Keep all application-owned code and user-facing text in English.
+- [x] Provide a polished, keyboard-friendly, searchable, and responsive interactive terminal experience.
+- [x] Load `~/.title-tmdb-file/config.json` before the normal interactive workflow.
+- [x] Ask for the TMDB API key first only when the saved API key is missing or invalid.
+- [x] Ask for the TMDB metadata language next only when the saved language is missing or invalid.
+- [x] Skip both startup prompts when both saved fields are valid.
+- [x] Persist a complete configuration without exposing the API key in application output.
+- [x] Provide `title-tmdb-file config` to deliberately edit and save both fields.
+- [x] Validate the API key and language before filesystem discovery.
 - [ ] Start in the current directory without requiring a separate source-folder configuration.
 - [ ] Ask for the destination after startup configuration and before listing sources.
 - [ ] List only direct child folders as source options.
@@ -1009,9 +1014,9 @@ The MVP is complete only when all of the following criteria are met:
 - [ ] List only direct .mkv files from each selected folder.
 - [ ] Allow multiple-file selection.
 - [ ] Apply the one-TMDB-item-per-folder rule.
-- [ ] Search movies and series in real time.
-- [ ] Allow the user to enter an ID and type manually.
-- [ ] Display the type and title before using the data.
+- [x] Search movies and series in real time.
+- [x] Allow the user to enter an ID and type manually.
+- [x] Display the type and title before using the data.
 - [ ] Ask separately for season and episode for each series file.
 - [ ] Generate exactly the documented filename pattern.
 - [ ] Normalize titles for filenames, including replacing invalid characters such as colon, without losing the ID, season, or episode.
@@ -1107,9 +1112,9 @@ The detailed implementation breakdown is maintained in [Implementation Tasks](ta
 ### Phase 2 — TMDB
 
 - [x] Implement per-user credential persistence and the shared configuration wizard.
-- [ ] Implement movie and series searches.
-- [ ] Implement ID confirmation.
-- [ ] Implement details and episode validation.
+- [x] Implement movie and series searches.
+- [x] Implement ID confirmation.
+- [x] Implement details and episode validation.
 
 ### Phase 3 — Plan and movement
 

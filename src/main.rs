@@ -3,6 +3,7 @@ pub mod cli;
 pub mod config;
 pub mod domain;
 pub mod error;
+pub mod tmdb;
 pub mod ui;
 
 use clap::Parser;

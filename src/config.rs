@@ -82,6 +82,8 @@ pub enum ConfigPromptMode {
     MissingOnly,
     /// Ask for both fields so the `config` command can update them deliberately.
     ReplaceAll,
+    /// Recollect only the API key after TMDB rejects the saved credential.
+    RepairApiKey,
 }
 
 /// Owns the on-disk location and serialization policy for the user's configuration.
@@ -230,8 +232,15 @@ pub fn configure_interactively<U: InteractiveUi>(
         Err(error) => return Err(error.into()),
     };
 
-    let prompt_api_key = mode == ConfigPromptMode::ReplaceAll || !stored.has_api_key();
-    let prompt_language = mode == ConfigPromptMode::ReplaceAll || !stored.has_language();
+    let prompt_api_key = match mode {
+        ConfigPromptMode::MissingOnly => !stored.has_api_key(),
+        ConfigPromptMode::ReplaceAll | ConfigPromptMode::RepairApiKey => true,
+    };
+    let prompt_language = match mode {
+        ConfigPromptMode::MissingOnly => !stored.has_language(),
+        ConfigPromptMode::ReplaceAll => true,
+        ConfigPromptMode::RepairApiKey => false,
+    };
     let should_persist = mode == ConfigPromptMode::ReplaceAll || prompt_api_key || prompt_language;
     let total_steps = (if prompt_api_key { 1 } else { 0 }) + (if prompt_language { 1 } else { 0 });
 

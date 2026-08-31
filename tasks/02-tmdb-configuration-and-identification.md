@@ -1,6 +1,6 @@
 # Task 02 — TMDB Configuration and Identification
 
-**Status:** In progress — per-user configuration persistence and the shared configuration wizard are implemented; TMDB verification and identification remain.
+**Status:** Completed — per-user configuration persistence, credential validation, search, manual identification, verified details, and episode validation are implemented and covered by offline tests with a local mocked HTTP server.
 **Priority:** P0
 **Dependencies:** Task 01
 **Blocks:** Task 05
@@ -10,6 +10,25 @@
 Implement the TMDB boundary that configures credentials, selects the metadata language, searches for movies and TV series in real time, confirms manually entered IDs, and validates series episodes. This task supplies trusted metadata to the planning layer without knowing how files are moved or how filenames are assembled.
 
 The TMDB API is the authority for the identifier, media type, and title. A user-entered title is never a substitute for a confirmed TMDB response. The application UI remains English even when the selected TMDB language is not English.
+
+## Implementation delivered
+
+The task is implemented across the following boundaries:
+
+- `src/config.rs` owns the per-user JSON store, masked/default configuration prompts, locale normalization, and the shared `config`/startup configuration flow.
+- `src/tmdb/client.rs` owns the reusable blocking HTTP client, TMDB v3 request construction, API-key query authentication, language propagation, bounded response handling, timeouts, and typed HTTP failures.
+- `src/tmdb/models.rs` keeps TMDB response structs separate from the application's domain models and applies title fallback, year extraction, adult-result filtering, ID checks, and media-type checks.
+- `src/domain.rs` owns positive TMDB IDs, typed media types, non-negative episode references, search candidates, verified items, and verified episodes.
+- `src/app.rs` exposes reusable identification and episode-validation workflows that keep prompts, retries, confirmation, and TMDB calls separate from filesystem operations.
+- `src/cli.rs` implements the English interactive TMDB method, result-selection, confirmation, and episode-input controls behind the renderer-neutral UI traits.
+
+Credential validation uses `GET /3/configuration` before the future filesystem-selection stage. Search
+uses the movie and TV endpoints separately, always sends the configured language and
+`include_adult=false`, limits the mapped result set, and never selects a result automatically.
+
+The client tests use a local loopback HTTP server and do not require a real API key, network access,
+or live TMDB data. The normal application workflow intentionally stops after verified startup
+configuration until Tasks 03–05 connect source selection, naming, planning, and movement.
 
 ## Required outcome
 
@@ -201,18 +220,18 @@ Cover at least:
 - [x] The `config` command reopens both fields and reuses the shared configuration code.
 - [x] API-key input is masked and never echoed by the terminal adapter.
 - [x] Saved configuration is written with owner-only file permissions where supported.
-- [ ] The API-key prompt is the first missing-field question after `clap` parsing.
-- [ ] API-key input is validated against TMDB before filesystem discovery.
-- [ ] The language prompt is the next missing-field question when both fields are missing.
+- [x] The API-key prompt is the first missing-field question after `clap` parsing.
+- [x] API-key input is validated against TMDB before filesystem discovery.
+- [x] The language prompt is the next missing-field question when both fields are missing.
 - [x] `TMDB_API_KEY` and `TMDB_LANGUAGE` provide fallback defaults without bypassing required prompts.
 - [x] The initial language default is `pt-BR`.
-- [ ] Configuration is validated against TMDB before destination or source-folder discovery.
-- [ ] One reusable TMDB client applies authentication, language, timeout, and error policy consistently.
-- [ ] Movie and TV searches happen in real time.
-- [ ] Search candidates are clearly typed and no result is selected silently.
-- [ ] Manual IDs require an explicit media type and positive numeric value.
-- [ ] Details are fetched and confirmed before metadata enters the operation plan.
-- [ ] Series season/episode combinations can be validated through TMDB.
-- [ ] All application-owned text is English.
-- [ ] No credential appears in logs, errors, previews, filenames, plans, or persistent state outside the documented per-user configuration file.
-- [ ] Mocked tests cover success, failure, cancellation, and redaction paths.
+- [x] Configuration is validated against TMDB before destination or source-folder discovery.
+- [x] One reusable TMDB client applies authentication, language, timeout, and error policy consistently.
+- [x] Movie and TV searches happen in real time.
+- [x] Search candidates are clearly typed and no result is selected silently.
+- [x] Manual IDs require an explicit media type and positive numeric value.
+- [x] Details are fetched and confirmed before metadata enters the operation plan.
+- [x] Series season/episode combinations can be validated through TMDB.
+- [x] All application-owned text is English.
+- [x] No credential appears in logs, errors, previews, filenames, plans, or persistent state outside the documented per-user configuration file.
+- [x] Mocked tests cover success, failure, cancellation, and redaction paths.

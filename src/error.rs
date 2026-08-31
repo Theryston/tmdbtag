@@ -3,6 +3,8 @@ use std::{io, path::PathBuf};
 use serde_json::Error as JsonError;
 use thiserror::Error;
 
+use crate::domain::{DomainError, MediaType};
+
 /// Errors raised while collecting or validating startup configuration.
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -72,6 +74,125 @@ impl ConfigError {
     }
 }
 
+/// Errors returned by the TMDB transport and response-mapping boundary.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum TmdbError {
+    /// The reusable HTTP client could not be initialized.
+    #[error("The TMDB HTTP client could not be initialized: {message}")]
+    ClientBuild {
+        /// A sanitized client-construction explanation.
+        message: String,
+    },
+    /// The configured base URL is not an HTTP(S) URL that can accept path segments.
+    #[error("The TMDB base URL is invalid.")]
+    InvalidBaseUrl,
+    /// TMDB rejected the configured credential.
+    #[error(
+        "TMDB authentication failed (HTTP {status}). Check the API key with `title-tmdb-file config`."
+    )]
+    Authentication {
+        /// The HTTP status returned by TMDB.
+        status: u16,
+    },
+    /// TMDB asked the client to slow down.
+    #[error("TMDB rate limit reached. Retry the request later.")]
+    RateLimited {
+        /// The optional server-provided delay, retained for callers that want to render it.
+        retry_after_seconds: Option<u64>,
+    },
+    /// A requested TMDB resource does not exist.
+    #[error("TMDB could not find {resource}.")]
+    NotFound {
+        /// A safe resource description such as `movie 550`.
+        resource: String,
+    },
+    /// The selected endpoint returned an explicitly different media namespace.
+    #[error("TMDB returned media type {actual}, but {expected} was requested.")]
+    MediaTypeMismatch {
+        /// The media namespace selected by the user.
+        expected: MediaType,
+        /// The safe type label returned by TMDB.
+        actual: String,
+    },
+    /// TMDB returned a server-side failure.
+    #[error("TMDB returned server error HTTP {status}. Retry later.")]
+    Server {
+        /// The HTTP status returned by TMDB.
+        status: u16,
+    },
+    /// The request exceeded the configured timeout.
+    #[error("The TMDB request timed out while {operation}.")]
+    Timeout {
+        /// A safe operation description without a URL or credential.
+        operation: String,
+    },
+    /// The request failed before a valid response was received.
+    #[error("The TMDB request failed while {operation}.")]
+    Network {
+        /// A safe operation description without a URL or credential.
+        operation: String,
+    },
+    /// TMDB returned JSON that could not be mapped to the expected response.
+    #[error("TMDB returned an invalid response while {operation}: {reason}")]
+    InvalidResponse {
+        /// A safe operation description without a URL or credential.
+        operation: String,
+        /// A parser or invariant explanation that does not contain the response body.
+        reason: String,
+    },
+    /// TMDB returned an unhandled HTTP status.
+    #[error("TMDB returned HTTP {status} while {operation}.")]
+    UnexpectedStatus {
+        /// A safe operation description without a URL or credential.
+        operation: String,
+        /// The unexpected HTTP status.
+        status: u16,
+    },
+    /// A requested episode does not exist in the selected series.
+    #[error("TMDB could not find series {series_id} episode S{season:02}E{episode:02}.")]
+    EpisodeNotFound {
+        /// The verified series ID.
+        series_id: u64,
+        /// The requested season.
+        season: u32,
+        /// The requested episode.
+        episode: u32,
+    },
+    /// A search request was given no usable text.
+    #[error("The TMDB search query cannot be empty.")]
+    EmptySearchQuery,
+    /// A search page number was outside the TMDB range.
+    #[error("TMDB search pages start at 1.")]
+    InvalidSearchPage,
+}
+
+impl TmdbError {
+    /// Returns whether the error means the saved credential must be replaced.
+    pub const fn is_authentication(&self) -> bool {
+        matches!(self, Self::Authentication { .. })
+    }
+
+    /// Returns the process exit code appropriate for this TMDB failure.
+    pub const fn exit_code(&self) -> i32 {
+        match self {
+            Self::Authentication { .. }
+            | Self::InvalidBaseUrl
+            | Self::EmptySearchQuery
+            | Self::InvalidSearchPage
+            | Self::MediaTypeMismatch { .. } => 2,
+            Self::ClientBuild { .. }
+            | Self::RateLimited { .. }
+            | Self::NotFound { .. }
+            | Self::Server { .. }
+            | Self::Timeout { .. }
+            | Self::Network { .. }
+            | Self::InvalidResponse { .. }
+            | Self::UnexpectedStatus { .. }
+            | Self::EpisodeNotFound { .. } => 1,
+        }
+    }
+}
+
 /// Errors raised at the interactive terminal boundary.
 #[derive(Debug, Error)]
 pub enum UiError {
@@ -87,6 +208,9 @@ pub enum UiError {
     /// A selection prompt was asked to render without any options.
     #[error("Cannot display an empty {context} selection.")]
     EmptySelection { context: &'static str },
+    /// A UI implementation returned a position outside the options it was given.
+    #[error("The interactive selection returned an invalid {context}.")]
+    InvalidSelection { context: &'static str },
     /// The progress renderer could not be configured.
     #[error("The progress indicator could not be configured: {0}")]
     ProgressStyle(String),
@@ -110,6 +234,12 @@ pub enum AppError {
     /// Startup configuration was invalid.
     #[error(transparent)]
     Configuration(#[from] ConfigError),
+    /// An input could not become a valid domain value.
+    #[error(transparent)]
+    Domain(#[from] DomainError),
+    /// TMDB rejected a request or returned an unusable response.
+    #[error(transparent)]
+    Tmdb(#[from] TmdbError),
     /// The normal wizard requires an interactive terminal.
     #[error("This command requires an interactive terminal with stdin and stderr attached.")]
     NonInteractive,
@@ -123,6 +253,8 @@ impl AppError {
     pub const fn exit_code(&self) -> i32 {
         match self {
             Self::Configuration(error) => error.exit_code(),
+            Self::Domain(_) => 2,
+            Self::Tmdb(error) => error.exit_code(),
             Self::NonInteractive => 2,
             Self::Ui(_) => 1,
         }

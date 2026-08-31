@@ -6,9 +6,11 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::{
     app,
-    domain::RunOutcome,
+    domain::{
+        EpisodeRef, IdentificationMethod, MediaType, RunOutcome, TmdbItem, TmdbSearchCandidate,
+    },
     error::{AppError, AppResult, UiError, UiResult},
-    ui::{InteractiveUi, MessageLevel, ProgressOutput},
+    ui::{InteractiveUi, MessageLevel, ProgressOutput, TmdbInteraction},
 };
 
 const MULTI_SELECT_SEARCH_THRESHOLD: usize = 10;
@@ -279,6 +281,119 @@ impl InteractiveUi for TerminalUi {
     }
 }
 
+impl TmdbInteraction for TerminalUi {
+    fn choose_identification_method(&mut self) -> UiResult<Option<IdentificationMethod>> {
+        let items = vec![
+            "Search TMDB by title".to_owned(),
+            "Enter a TMDB ID manually".to_owned(),
+        ];
+        let selection = self.select_one("How should this item be identified?", &items, false)?;
+        match selection {
+            None => Ok(None),
+            Some(0) => Ok(Some(IdentificationMethod::Search)),
+            Some(1) => Ok(Some(IdentificationMethod::ManualId)),
+            Some(_) => Err(UiError::InvalidSelection {
+                context: "identification method",
+            }),
+        }
+    }
+
+    fn choose_media_type(&mut self) -> UiResult<Option<MediaType>> {
+        let items = vec!["Movie".to_owned(), "TV series".to_owned()];
+        let selection = self.select_one("What type of TMDB item is this ID?", &items, false)?;
+        match selection {
+            None => Ok(None),
+            Some(0) => Ok(Some(MediaType::Movie)),
+            Some(1) => Ok(Some(MediaType::Series)),
+            Some(_) => Err(UiError::InvalidSelection {
+                context: "media type",
+            }),
+        }
+    }
+
+    fn ask_search_query(&mut self) -> UiResult<Option<String>> {
+        self.ask_text("Search TMDB by title", None)
+    }
+
+    fn select_tmdb_result(
+        &mut self,
+        candidates: &[TmdbSearchCandidate],
+    ) -> UiResult<Option<usize>> {
+        if candidates.is_empty() {
+            return Err(UiError::EmptySelection {
+                context: "TMDB result",
+            });
+        }
+
+        let items: Vec<String> = candidates
+            .iter()
+            .map(|candidate| {
+                let year = candidate
+                    .year
+                    .map(|year| format!(" ({year})"))
+                    .unwrap_or_default();
+                format!(
+                    "[{}] {} {}{}",
+                    candidate.media_type,
+                    candidate.id,
+                    terminal_text(&candidate.title),
+                    year
+                )
+            })
+            .collect();
+        let selection = self.select_one("Select a TMDB result", &items, true)?;
+        match selection {
+            None => Ok(None),
+            Some(index) if index < candidates.len() => Ok(Some(index)),
+            Some(_) => Err(UiError::InvalidSelection {
+                context: "TMDB result",
+            }),
+        }
+    }
+
+    fn ask_tmdb_id(&mut self) -> UiResult<Option<String>> {
+        self.ask_text("TMDB ID", None)
+    }
+
+    fn confirm_tmdb_item(&mut self, item: &TmdbItem) -> UiResult<Option<bool>> {
+        let year = item
+            .year
+            .map(|year| format!(" ({year})"))
+            .unwrap_or_default();
+        let prompt = format!(
+            "Use [{}] {} {}{}?",
+            item.media_type,
+            item.id,
+            terminal_text(&item.title),
+            year
+        );
+        self.confirm(&prompt, false)
+    }
+
+    fn ask_episode_numbers(&mut self, file_label: &str) -> UiResult<Option<(String, String)>> {
+        let file_label = terminal_text(file_label);
+        let Some(season) = self.ask_text(&format!("Season number for {file_label}"), None)? else {
+            return Ok(None);
+        };
+        let Some(episode) = self.ask_text(&format!("Episode number for {file_label}"), None)?
+        else {
+            return Ok(None);
+        };
+        Ok(Some((season, episode)))
+    }
+
+    fn show_verified_episode(&mut self, episode: &EpisodeRef) -> UiResult<()> {
+        self.show_message(
+            MessageLevel::Success,
+            &format!(
+                "Verified episode S{:02}E{:02} through TMDB.",
+                episode.season(),
+                episode.episode()
+            ),
+        )
+    }
+}
+
 #[derive(Debug)]
 struct IndicatifProgress {
     progress: ProgressBar,
@@ -328,6 +443,19 @@ fn filter_item_indices(items: &[String], query: &str) -> Vec<usize> {
         .iter()
         .enumerate()
         .filter_map(|(index, item)| item.to_lowercase().contains(&query).then_some(index))
+        .collect()
+}
+
+fn terminal_text(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                '�'
+            } else {
+                character
+            }
+        })
         .collect()
 }
 
