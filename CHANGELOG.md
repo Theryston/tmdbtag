@@ -1,0 +1,35 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [0.1.0](https://github.com/Theryston/tmdbtag/releases/tag/tmdbtag-v0.1.0) - 2026-08-31
+
+### Fixed
+
+- clean up readme
+
+### Other
+
+- Add automated release pipeline and installers
+- Rename project to tmdbtag and refresh README
+- Add copy-or-move operation selection
+- Update filename separator to __S__
+- Switch naming format to `__TMDB__` field delimiter
+- Update live search debounce to 500 ms and preserve file logs
+- **Add live debounced TMDB search selector with crossterm**
+- Replace per-file context box with active file line
+- Unify video discovery with expandable source-root explorer
+- Complete interactive MVP workflow through safe file movement
+- Implement naming normalization and metadata recovery
+- Implement filesystem discovery and media selection
+- Add TMDB client with search and identification
+- Persist shared TMDB configuration between runs
+- Implement CLI foundation and interactive shell
+- Add implementation task breakdowns
+- Add engineering and product specification docs
+- Initialize Rust project with TMDb file title tool
