@@ -1037,14 +1037,14 @@ arrow-key navigation, use `Space` only for video selection, use `Tab` to expand 
 highlighted folder, and use `Enter` to return one flat array of selected file positions. A folder
 may be expanded without selecting any of its descendants.
 
-During per-file identification, the UI must open a bounded visual context before the first TMDB
-prompt for that file and close it only after identification, episode validation, or cancellation
-has finished. The context must show the file position in the batch and its relative path. Long
-paths must be truncated without splitting UTF-8 text, preferably from the left so the filename
-suffix remains visible. Every TMDB search, result selection, detail confirmation, episode prompt,
-validation message, and related progress status for that file must remain visibly associated with
-the open context. A context must never cause the application to replace the exact source `PathBuf`
-with its truncated display label.
+During per-file identification, the UI must show one active-file context line before the first TMDB
+prompt. The line must show the file position and a path relative to the source root. Long paths
+must be truncated without splitting UTF-8 text, preferably from the left so the filename suffix
+remains visible. Every TMDB search, result selection, detail confirmation, episode prompt,
+validation message, and related progress status for that file must remain below that line. Before
+the next file begins, clear the previous file's visible identification output and show the next
+file's context line. This presentation rule must never replace the exact source `PathBuf` with its
+display label.
 
 ### Modern terminal quality bar
 
@@ -1058,9 +1058,9 @@ Provide, where supported by the selected terminal UI library:
 - keyboard navigation;
 - obvious selected/unselected states;
 - searchable or filterable long lists;
-- a bounded context box for every selected video file, showing its relative path and file position;
-- left-truncation of long context paths so the filename suffix remains visible;
-- grouping of every TMDB and series episode prompt/status for a file inside that file's context;
+- a single per-file context line showing its relative path and file position;
+- replacement of the previous file's identification output before the next file begins;
+- grouping of the active file's TMDB and series-episode prompts/statuses below that line;
 - clear selection counts;
 - aligned source/destination preview tables;
 - distinct success, warning, error, and informational styles;

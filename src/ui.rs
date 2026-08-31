@@ -46,10 +46,12 @@ pub trait InteractiveUi {
     /// Renders a stable wizard step indicator.
     fn show_step(&mut self, current: usize, total: usize, label: &str) -> UiResult<()>;
 
-    /// Opens a visual context section for one selected video file.
+    /// Shows the active file line before its metadata prompts.
     ///
     /// Every TMDB and episode prompt for that file is rendered after this call and before
-    /// `finish_file_context`, so a user can always tell which file is being processed.
+    /// `finish_file_context`, so a user can always tell which file is being processed. A concrete
+    /// terminal implementation may replace the previous file's visible output before rendering
+    /// the new line.
     fn show_file_context(
         &mut self,
         current_file: usize,
@@ -66,7 +68,10 @@ pub trait InteractiveUi {
         )
     }
 
-    /// Closes the visual context section for the current selected video file.
+    /// Ends the active file context without clearing its output.
+    ///
+    /// The next `show_file_context` call is responsible for replacing the previous file's visible
+    /// identification output, which keeps the final file's result visible after the workflow ends.
     fn finish_file_context(&mut self) -> UiResult<()> {
         Ok(())
     }

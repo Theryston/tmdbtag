@@ -23,7 +23,6 @@ use crate::{
 };
 
 const MULTI_SELECT_SEARCH_THRESHOLD: usize = 10;
-const FILE_CONTEXT_INNER_WIDTH: usize = 72;
 const MEDIA_EXPLORER_RESERVED_LINES: usize = 6;
 
 /// Command-line arguments for the default interactive workflow.
@@ -66,11 +65,9 @@ pub fn execute(cli: Cli) -> AppResult<RunOutcome> {
 pub struct TerminalUi {
     terminal: dialoguer::console::Term,
     theme: ColorfulTheme,
-    file_context: Option<FileContext>,
+    file_flow_started: bool,
+    current_step: Option<String>,
 }
-
-#[derive(Debug, Clone, Copy)]
-struct FileContext;
 
 #[derive(Debug)]
 struct MediaExplorer {
@@ -264,7 +261,8 @@ impl TerminalUi {
         Self {
             terminal: dialoguer::console::Term::stderr(),
             theme: ColorfulTheme::default(),
-            file_context: None,
+            file_flow_started: false,
+            current_step: None,
         }
     }
 
@@ -277,28 +275,9 @@ impl TerminalUi {
         self.terminal.write_line(line).map_err(UiError::Prompt)
     }
 
-    fn contextual_text(&self, value: &str) -> String {
-        match self.file_context {
-            Some(_) => format!("│ {value}"),
-            None => value.to_owned(),
-        }
-    }
-
-    fn file_context_border(top: bool) -> String {
-        let (left, right) = if top { ('╭', '╮') } else { ('╰', '╯') };
-        format!("{left}{}{right}", "─".repeat(FILE_CONTEXT_INNER_WIDTH + 2))
-    }
-
-    fn file_context_line(value: &str) -> String {
-        let value = truncate_terminal_text(value, FILE_CONTEXT_INNER_WIDTH);
-        let padding = " ".repeat(FILE_CONTEXT_INNER_WIDTH - value.chars().count());
-        format!("│ {value}{padding} │")
-    }
-
     fn filter_items(&mut self, prompt: &str, items: &[String]) -> UiResult<Option<Vec<usize>>> {
         loop {
-            let filter_prompt =
-                self.contextual_text(&format!("Filter {prompt} (leave empty to show all)"));
+            let filter_prompt = format!("Filter {prompt} (leave empty to show all)");
             let result = Input::<String>::with_theme(&self.theme)
                 .with_prompt(filter_prompt)
                 .allow_empty(true)
@@ -340,7 +319,7 @@ impl TerminalUi {
             &mut rendered_lines,
         );
         if interaction.is_err() {
-            let _ = self.clear_media_explorer(&mut rendered_lines);
+            let _ = self.clear_rendered_lines(&mut rendered_lines);
         }
         let restore_cursor = self.terminal.show_cursor().map_err(UiError::Prompt);
 
@@ -362,13 +341,13 @@ impl TerminalUi {
         loop {
             let visible = explorer.visible_entries(expanded);
             if visible.is_empty() {
-                self.clear_media_explorer(rendered_lines)?;
+                self.clear_rendered_lines(rendered_lines)?;
                 return Err(UiError::EmptySelection {
                     context: "media explorer",
                 });
             }
             *cursor = (*cursor).min(visible.len() - 1);
-            self.clear_media_explorer(rendered_lines)?;
+            self.clear_rendered_lines(rendered_lines)?;
             *rendered_lines = self.render_media_explorer(
                 source_root,
                 &visible,
@@ -453,7 +432,7 @@ impl TerminalUi {
                         continue;
                     }
 
-                    self.clear_media_explorer(rendered_lines)?;
+                    self.clear_rendered_lines(rendered_lines)?;
                     self.write_line(&format!(
                         "✔ Selected {} video file(s).",
                         selected_indices.len()
@@ -461,7 +440,7 @@ impl TerminalUi {
                     return Ok(Some(selected_indices));
                 }
                 Key::Escape | Key::Char('q') | Key::CtrlC => {
-                    self.clear_media_explorer(rendered_lines)?;
+                    self.clear_rendered_lines(rendered_lines)?;
                     return Ok(None);
                 }
                 _ => {}
@@ -554,7 +533,7 @@ impl TerminalUi {
         Ok(lines.len())
     }
 
-    fn clear_media_explorer(&self, rendered_lines: &mut usize) -> UiResult<()> {
+    fn clear_rendered_lines(&self, rendered_lines: &mut usize) -> UiResult<()> {
         if *rendered_lines == 0 {
             return Ok(());
         }
@@ -588,10 +567,12 @@ impl InteractiveUi for TerminalUi {
     }
 
     fn show_step(&mut self, current: usize, total: usize, label: &str) -> UiResult<()> {
-        self.write_line(&format!(
+        let line = format!(
             "{} Step {current}/{total} · {label}",
             dialoguer::console::style("›").cyan().bold()
-        ))
+        );
+        self.current_step = Some(line.clone());
+        self.write_line(&line)
     }
 
     fn show_file_context(
@@ -601,30 +582,27 @@ impl InteractiveUi for TerminalUi {
         file_path: &Path,
         source_root: &Path,
     ) -> UiResult<()> {
-        self.file_context = Some(FileContext);
+        if self.file_flow_started {
+            self.terminal.clear_screen().map_err(UiError::Prompt)?;
+            if let Some(step) = &self.current_step {
+                self.write_line(step)?;
+                self.write_line("")?;
+            }
+        } else {
+            self.write_line("")?;
+        }
+
+        self.file_flow_started = true;
         let relative_path = crate::ui::display_relative_path(file_path, source_root);
 
-        self.write_line("")?;
-        self.write_line(&Self::file_context_border(true))?;
-        self.write_line(&Self::file_context_line(&format!(
-            "File {} of {}",
-            current_file, total_files
-        )))?;
-        self.write_line(&Self::file_context_line("TMDB choices for this file"))?;
-        self.write_line(&Self::file_context_line(&format!(
-            "Source: {}",
+        self.write_line(&format!(
+            "File {current_file} of {total_files} · {}",
             terminal_text(&relative_path)
-        )))
+        ))
     }
 
     fn finish_file_context(&mut self) -> UiResult<()> {
-        let result = if self.file_context.is_some() {
-            self.write_line(&Self::file_context_border(false))
-        } else {
-            Ok(())
-        };
-        self.file_context = None;
-        result
+        Ok(())
     }
 
     fn ask_masked_secret(
@@ -656,7 +634,6 @@ impl InteractiveUi for TerminalUi {
     }
 
     fn ask_text(&mut self, prompt: &str, default: Option<&str>) -> UiResult<Option<String>> {
-        let prompt = self.contextual_text(prompt);
         let mut input = Input::<String>::with_theme(&self.theme)
             .with_prompt(prompt)
             .allow_empty(true);
@@ -677,32 +654,36 @@ impl InteractiveUi for TerminalUi {
             return Err(UiError::EmptySelection { context: "single" });
         }
 
-        if searchable {
+        let (visible_indices, visible_items, selector_prompt) = if searchable {
             let Some(visible_indices) = self.filter_items(prompt, items)? else {
                 return Ok(None);
             };
-            let visible_items: Vec<&str> = visible_indices
+            let visible_items = visible_indices
                 .iter()
-                .map(|&index| items[index].as_str())
-                .collect();
-            let selection = map_optional_prompt(
-                Select::with_theme(&self.theme)
-                    .with_prompt(self.contextual_text(&format!("{prompt} (type a filter above)")))
-                    .items(&visible_items)
-                    .max_length(12)
-                    .interact_opt(),
-            )?;
-
-            Ok(selection.map(|position| visible_indices[position]))
-        } else {
-            map_optional_prompt(
-                Select::with_theme(&self.theme)
-                    .with_prompt(self.contextual_text(prompt))
-                    .items(items)
-                    .max_length(12)
-                    .interact_opt(),
+                .map(|&index| items[index].clone())
+                .collect::<Vec<_>>();
+            (
+                visible_indices,
+                visible_items,
+                format!("{prompt} (type a filter above)"),
             )
-        }
+        } else {
+            (
+                (0..items.len()).collect(),
+                items.to_vec(),
+                prompt.to_owned(),
+            )
+        };
+
+        let visible_item_labels = visible_items.iter().map(String::as_str).collect::<Vec<_>>();
+        map_optional_prompt(
+            Select::with_theme(&self.theme)
+                .with_prompt(selector_prompt)
+                .items(&visible_item_labels)
+                .max_length(12)
+                .interact_opt(),
+        )
+        .map(|selection| selection.map(|position| visible_indices[position]))
     }
 
     fn select_video_files(
@@ -747,9 +728,7 @@ impl InteractiveUi for TerminalUi {
             .collect();
         let selection = map_optional_prompt(
             MultiSelect::with_theme(&self.theme)
-                .with_prompt(
-                    self.contextual_text(&format!("{prompt} (Space to toggle, Enter to confirm)")),
-                )
+                .with_prompt(format!("{prompt} (Space to toggle, Enter to confirm)"))
                 .items(&visible_items)
                 .max_length(12)
                 .interact_opt(),
@@ -764,7 +743,6 @@ impl InteractiveUi for TerminalUi {
     }
 
     fn confirm(&mut self, prompt: &str, default: bool) -> UiResult<Option<bool>> {
-        let prompt = self.contextual_text(prompt);
         map_optional_prompt(
             Confirm::with_theme(&self.theme)
                 .with_prompt(prompt)
@@ -774,7 +752,6 @@ impl InteractiveUi for TerminalUi {
     }
 
     fn show_message(&mut self, level: MessageLevel, message: &str) -> UiResult<()> {
-        let message = self.contextual_text(message);
         let (prefix, style_message) = match level {
             MessageLevel::Info => ("·", dialoguer::console::style(message).cyan()),
             MessageLevel::Success => ("✔", dialoguer::console::style(message).green()),
@@ -794,12 +771,9 @@ impl InteractiveUi for TerminalUi {
         let progress = ProgressBar::new_spinner();
         progress.set_style(style);
         progress.enable_steady_tick(Duration::from_millis(80));
-        progress.set_message(self.contextual_text(message));
+        progress.set_message(message.to_owned());
 
-        Ok(Box::new(IndicatifProgress {
-            progress,
-            contextual: self.file_context.is_some(),
-        }))
+        Ok(Box::new(IndicatifProgress { progress }))
     }
 
     fn show_plan_preview(&mut self, plan: &crate::domain::OperationPlan) -> UiResult<()> {
@@ -1002,32 +976,19 @@ impl TmdbInteraction for TerminalUi {
 #[derive(Debug)]
 struct IndicatifProgress {
     progress: ProgressBar,
-    contextual: bool,
-}
-
-impl IndicatifProgress {
-    fn contextual_message(&self, message: &str) -> String {
-        if self.contextual {
-            format!("│ {message}")
-        } else {
-            message.to_owned()
-        }
-    }
 }
 
 impl ProgressOutput for IndicatifProgress {
     fn set_message(&self, message: &str) {
-        self.progress.set_message(self.contextual_message(message));
+        self.progress.set_message(message.to_owned());
     }
 
     fn finish_success(&self, message: &str) {
-        self.progress
-            .finish_with_message(self.contextual_message(&format!("✔ {message}")));
+        self.progress.finish_with_message(format!("✔ {message}"));
     }
 
     fn finish_error(&self, message: &str) {
-        self.progress
-            .finish_with_message(self.contextual_message(&format!("✘ {message}")));
+        self.progress.finish_with_message(format!("✘ {message}"));
     }
 }
 
@@ -1153,7 +1114,7 @@ mod tests {
     }
 
     #[test]
-    fn file_context_truncation_preserves_the_filename_suffix_and_unicode_boundaries() {
+    fn terminal_text_truncation_preserves_the_filename_suffix_and_unicode_boundaries() {
         assert_eq!(
             truncate_terminal_text("a very long path/episode.mkv", 12),
             "…episode.mkv"

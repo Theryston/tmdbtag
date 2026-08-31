@@ -515,10 +515,11 @@ The terminal UI should include, where supported by the chosen interaction librar
 - a clear indication that the current selection is rooted in the current directory;
 - a compact tree explorer with visible folder expand/collapse state;
 - an explicit keyboard hint for `Space` selection, `Tab` expansion/collapse, and `Enter` confirmation;
-- a bounded per-file context box showing the selected file's relative path, with long paths
-  truncated from the left so the filename remains visible;
-- all TMDB search, selection, confirmation, and series episode prompts for one file grouped inside
-  that file's context until its identification is complete;
+- a single per-file context line showing the selected file's relative path and position;
+- replacement of the previous file's identification output before the next file begins, so only the
+  active file's logs remain visible;
+- all TMDB search, selection, confirmation, and series episode prompts for one file grouped below
+  that file's context line until its identification is complete;
 - a concise final summary;
 - a graceful fallback when color, Unicode, or advanced terminal features are unavailable.
 

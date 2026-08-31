@@ -127,6 +127,7 @@ The terminal should communicate state clearly. At minimum:
 - never use color as the only carrier of safety-critical meaning;
 - avoid dumping raw JSON, unbounded search results, or noisy debug output into the normal UI;
 - keep long paths readable through wrapping, truncation with a visible indication, or a detail view;
+- show a single active-file context line and replace its logs before starting the next file;
 - preserve a usable plain-text fallback when styling is unavailable or disabled;
 - make cancellation obvious and safe.
 
