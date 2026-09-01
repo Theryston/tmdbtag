@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/Theryston/tmdbtag/compare/tmdbtag-v0.1.1...tmdbtag-v0.1.2) - 2026-09-01
+
+### Fixed
+
+- Use same-namespace rename for local moves
+
+### Other
+
+- Add live transfer-rate display to progress bar
+
 ## [0.1.1](https://github.com/Theryston/tmdbtag/compare/tmdbtag-v0.1.0...tmdbtag-v0.1.1) - 2026-08-31
 
 ### Fixed
