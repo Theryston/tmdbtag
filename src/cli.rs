@@ -24,7 +24,7 @@ use crate::{
     },
     error::{AppError, AppResult, TmdbError, UiError, UiResult},
     storage::{StorageDestination, StorageExecutionReport, StoragePlan, StorageVideoFile},
-    ui::{InteractiveUi, MessageLevel, ProgressOutput, TmdbInteraction},
+    ui::{InteractiveUi, MessageLevel, ProgressOutput, TmdbInteraction, format_transfer_speed},
 };
 
 const MULTI_SELECT_SEARCH_THRESHOLD: usize = 10;
@@ -1238,9 +1238,10 @@ impl InteractiveUi for TerminalUi {
     fn start_activity(&mut self, message: &str) -> UiResult<Box<dyn ProgressOutput>> {
         let spinner_style = ProgressStyle::with_template("{spinner:.cyan} {msg}")
             .map_err(|error| UiError::ProgressStyle(error.to_string()))?;
-        let transfer_style =
-            ProgressStyle::with_template("{spinner:.cyan} {bar:40.cyan/blue} {percent:>3}% {msg}")
-                .map_err(|error| UiError::ProgressStyle(error.to_string()))?;
+        let transfer_style = ProgressStyle::with_template(
+            "{spinner:.cyan} {bar:40.cyan/blue} {percent:>3}% {prefix} {msg}",
+        )
+        .map_err(|error| UiError::ProgressStyle(error.to_string()))?;
         let progress = ProgressBar::new_spinner();
         progress.set_style(spinner_style);
         progress.enable_steady_tick(Duration::from_millis(80));
@@ -1462,6 +1463,10 @@ impl ProgressOutput for IndicatifProgress {
         };
         self.progress.set_length(display_total);
         self.progress.set_position(display_position);
+        self.progress.set_prefix(format!(
+            "Speed: {}",
+            format_transfer_speed(self.progress.per_sec())
+        ));
     }
 
     fn finish_success(&self, message: &str) {

@@ -433,6 +433,28 @@ pub(crate) fn format_file_size(size_bytes: u64) -> String {
     }
 }
 
+/// Formats a live transfer rate using decimal storage units.
+pub(crate) fn format_transfer_speed(bytes_per_second: f64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = if bytes_per_second.is_finite() && bytes_per_second > 0.0 {
+        bytes_per_second
+    } else {
+        0.0
+    };
+    let mut unit_index = 0;
+
+    while value >= 1000.0 && unit_index < UNITS.len() - 1 {
+        value /= 1000.0;
+        unit_index += 1;
+    }
+
+    if unit_index == 0 {
+        format!("{value:.0} {}/s", UNITS[unit_index])
+    } else {
+        format!("{value:.2} {}/s", UNITS[unit_index])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,5 +473,22 @@ mod tests {
             display_relative_path(Path::new("organized"), Path::new("root")),
             "../organized"
         );
+    }
+
+    #[test]
+    fn transfer_speed_uses_decimal_units() {
+        assert_eq!(format_transfer_speed(0.0), "0 B/s");
+        assert_eq!(format_transfer_speed(999.0), "999 B/s");
+        assert_eq!(format_transfer_speed(1_000.0), "1.00 KB/s");
+        assert_eq!(format_transfer_speed(1_000_000.0), "1.00 MB/s");
+        assert_eq!(format_transfer_speed(1_000_000_000.0), "1.00 GB/s");
+        assert_eq!(format_transfer_speed(1_000_000_000_000.0), "1.00 TB/s");
+    }
+
+    #[test]
+    fn transfer_speed_sanitizes_non_finite_values() {
+        assert_eq!(format_transfer_speed(f64::NAN), "0 B/s");
+        assert_eq!(format_transfer_speed(f64::INFINITY), "0 B/s");
+        assert_eq!(format_transfer_speed(-1.0), "0 B/s");
     }
 }

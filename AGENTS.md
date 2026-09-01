@@ -80,8 +80,8 @@ parsing, interactive terminal contracts, per-user TMDB and S3 configuration
 persistence, storage selection, local/S3 discovery and media selection, TMDB
 identification, deterministic naming, typed plan construction, complete
 preview, pre-commit validation, safe local and cross-storage copy/move
-execution with byte-based progress, and per-file execution reporting are
-available.
+execution with byte-based progress and live transfer-rate display, and
+per-file execution reporting are available.
 Future retrieval commands, non-interactive modes, and auxiliary-file support
 remain intentionally out of scope.
 
@@ -1483,8 +1483,9 @@ Provide, where supported by the selected terminal UI library:
 - clear selection counts;
 - aligned source/destination preview tables;
 - distinct success, warning, error, and informational styles;
-- a determinate aggregate byte-progress bar for file copies and moves, plus
-  status feedback for network requests;
+- a determinate aggregate byte-progress bar for file copies and moves, with a
+  live decimal transfer-rate estimate beside it, plus status feedback for
+  network requests;
 - clear retry, back, and cancel actions;
 - useful empty states;
 - a concise final summary.
@@ -1734,6 +1735,12 @@ temporary destination. For same-volume moves, emit a completed update after the
 no-replace publication succeeds because no byte stream is copied. Clamp values
 to the plan total and treat a successfully published zero-byte file as complete.
 The callback must not authorize, reorder, retry, or mutate an operation.
+
+The terminal renderer should derive its transfer-rate display from these actual
+progress updates. Use decimal units with the labels `B/s`, `KB/s`, `MB/s`,
+`GB/s`, and `TB/s`; do not estimate speed from file counts or an arbitrary
+per-file duration. A logical publication that does not stream bytes through the
+client may correctly display `0 B/s`.
 
 ### S3 object safety
 

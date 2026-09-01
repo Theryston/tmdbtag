@@ -13,7 +13,8 @@ file later.
 It is deliberately focused: no fragile filename guessing, no silent first-result
 selection, no overwrites, and no irreversible filesystem action hidden behind a
 prompt. You see the complete plan first, choose whether to copy or move, confirm
-it, and then watch a real byte-based progress bar while the operation runs.
+it, and then watch a real byte-based progress bar with live transfer speed while
+the operation runs.
 
 ## Why tmdbtag feels different
 
@@ -36,7 +37,8 @@ work into a calm, guided workflow:
 - Preview every source-to-destination mapping before anything changes.
 - Use a reserved filename delimiter so basic metadata can be recovered
   programmatically later.
-- See progress based on actual transferred bytes, not an arbitrary file counter.
+- See progress based on actual transferred bytes, not an arbitrary file counter,
+  together with a live `KB/s`, `MB/s`, `GB/s`, or `TB/s` transfer-rate display.
 
 The result is a collection that is easier to scan today and easier to automate
 tomorrow.
@@ -143,7 +145,8 @@ The guided session looks like this:
 12. For series, you enter a season and episode, which are validated against
     TMDB.
 13. It builds and displays the complete plan, including every destination name.
-14. A final confirmation starts the operation. The default is always negative.
+14. A final confirmation starts the operation. The default is always negative,
+    and the progress bar shows the current transfer speed while bytes move.
 
 When local storage is selected, the directory where you launch the command is
 the source root; the executable's location is not used as the source root. When
@@ -479,6 +482,13 @@ bounded parts are transferred. For server-side S3 copies and safe same-volume
 moves, the file's bytes are marked complete after publication succeeds because
 no client-side byte stream needs to be transferred. Zero-byte files are treated
 as complete once published.
+
+The progress bar also shows a smoothed transfer-rate estimate based on the
+reported byte movement. It uses decimal units and displays values such as
+`850 B/s`, `12.40 KB/s`, `3.25 MB/s`, `1.10 GB/s`, or `1.00 TB/s`. Operations
+that complete through logical publication without a client-side byte stream,
+such as a same-volume move or a server-side S3 copy, may show `0 B/s` because
+there were no transfer bytes to measure.
 
 ## Supported video files
 
