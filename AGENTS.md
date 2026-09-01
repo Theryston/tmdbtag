@@ -1014,17 +1014,19 @@ The contract must keep these concerns explicit:
 - `S3Storage` represents one selected catalog entry (name, bucket, endpoint,
   region, and credentials) plus one per-run prefix while retaining exact object
   keys as `String` values;
-- local-to-local operations use destination-side temporary files and
-  no-replace publication;
+- local-to-local copies use destination-side temporary files and no-replace
+  publication, while same-namespace moves use an O(1) no-replace
+  rename-equivalent and remove the source only after revalidation;
 - local-to-S3 operations use a no-replace upload and verify the resulting
   object before a move removes the source;
 - S3-to-local operations download into a local destination-side temporary file,
   verify it, publish it without replacement, and only then remove the object
   for a move;
 - S3-to-S3 operations use conditional server-side `CopyObject` followed by
-  conditional `DeleteObject` for a move when both selected buckets share an
-  endpoint; different endpoints use a private temporary bridge with the same
-  verification and no-replace guarantees;
+  conditional `DeleteObject` as the same-namespace rename-equivalent for a
+  move when both selected buckets and endpoints match; different endpoints
+  use a private temporary bridge with the same verification and no-replace
+  guarantees;
 - S3 discovery must handle `ListObjectsV2` pagination, filter the shared video
   extension allowlist, sort relative keys deterministically, and exclude the
   selected destination prefix when source and destination address the same
@@ -1686,10 +1688,11 @@ system.
 The current implementation publishes a regular-file destination with
 `std::fs::hard_link`, which fails atomically when the final path already exists,
 and removes the source only after the publication and source revalidation
-succeed. Automatic execution treats an operating-system cross-device error as
-the signal to use the cross-volume copy path. If hard-link publication is
-unsupported, the operation fails safely; do not replace it with a plain
-overwriting rename.
+succeed. The backend-neutral storage workflow uses the same O(1) publication
+for a Move within the Local namespace and treats an operating-system
+cross-device error as the signal to use the verified copy fallback. If
+hard-link publication is unsupported, the operation fails safely; do not
+replace it with a plain overwriting rename.
 
 ### Cross-volume moves
 

@@ -720,6 +720,23 @@ pub trait StorageBackend {
         on_progress: &mut dyn FnMut(u64),
     ) -> Result<(), StorageError>;
 
+    /// Publishes one move within the same storage namespace without streaming its bytes.
+    ///
+    /// The caller performs the final destination and source verification and removes the source
+    /// after publication succeeds. Backends may use a native same-storage rename or its
+    /// equivalent; they must not use this hook for different namespaces.
+    fn rename_within(
+        &self,
+        source_backend: &dyn StorageBackend,
+        source: &StoragePath,
+        destination: &StoragePath,
+        snapshot: &StorageSnapshot,
+        on_progress: &mut dyn FnMut(u64),
+    ) -> Result<(), StorageError> {
+        let _ = (source_backend, source, destination, snapshot, on_progress);
+        Err(StorageError::UnsupportedTransfer)
+    }
+
     /// Transfers one object from another backend of the same storage kind.
     ///
     /// Backends use this hook when the source and destination are different configured S3
@@ -1014,6 +1031,49 @@ impl StorageBackend for LocalStorage {
             let _ = fs::remove_file(&temporary);
         }
         result
+    }
+
+    fn rename_within(
+        &self,
+        source_backend: &dyn StorageBackend,
+        source: &StoragePath,
+        destination: &StoragePath,
+        snapshot: &StorageSnapshot,
+        on_progress: &mut dyn FnMut(u64),
+    ) -> Result<(), StorageError> {
+        if source_backend.kind() != StorageKind::Local
+            || !self.same_namespace(source_backend)
+            || source.kind() != StorageKind::Local
+            || destination.kind() != StorageKind::Local
+            || source == destination
+        {
+            return Err(StorageError::UnsupportedTransfer);
+        }
+
+        let source_path = self.local_path(source)?;
+        let destination_path = self.local_path(destination)?;
+
+        // A hard link followed by source removal is the portable no-replace equivalent available
+        // to this binary. It updates directory entries without reading or rewriting file bytes;
+        // the caller removes the source only after the destination is revalidated.
+        match fs::hard_link(source_path, destination_path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                Err(StorageError::DestinationAlreadyExists {
+                    path: destination_path.to_string_lossy().into_owned(),
+                })
+            }
+            Err(error) if is_cross_device_error(&error) => {
+                // A single LocalStorage namespace can span mounted filesystems. Preserve the
+                // existing verified copy fallback when a native same-filesystem publication is
+                // not possible.
+                self.transfer_within(source, destination, snapshot, on_progress)
+            }
+            Err(error) => Err(StorageError::DestinationPublication {
+                path: destination_path.to_string_lossy().into_owned(),
+                message: format!("could not rename the source without copying bytes: {error}"),
+            }),
+        }
     }
 
     fn download_to_file(
@@ -1460,6 +1520,32 @@ impl StorageBackend for S3Storage {
         on_progress: &mut dyn FnMut(u64),
     ) -> Result<(), StorageError> {
         self.copy_from_s3(self, source, destination, snapshot, on_progress)
+    }
+
+    fn rename_within(
+        &self,
+        source_backend: &dyn StorageBackend,
+        source: &StoragePath,
+        destination: &StoragePath,
+        snapshot: &StorageSnapshot,
+        on_progress: &mut dyn FnMut(u64),
+    ) -> Result<(), StorageError> {
+        let source_storage = source_backend
+            .as_any()
+            .downcast_ref::<S3Storage>()
+            .ok_or(StorageError::UnsupportedTransfer)?;
+        if !self.same_namespace(source_storage)
+            || source.kind() != StorageKind::S3
+            || destination.kind() != StorageKind::S3
+            || source == destination
+        {
+            return Err(StorageError::UnsupportedTransfer);
+        }
+
+        // S3 has no native rename. Within one bucket and endpoint, CopyObject is the service-side
+        // rename primitive: no object bytes pass through this process, and the caller removes the
+        // source only after verifying the newly published destination.
+        self.copy_from_s3(source_storage, source, destination, snapshot, on_progress)
     }
 
     fn transfer_between(
@@ -1990,7 +2076,23 @@ fn execute_one(
         });
     }
 
-    if operation.source_path.kind() == operation.destination_path.kind() {
+    let can_use_rename = can_rename_within(
+        file_operation,
+        &operation.source_path,
+        &operation.destination_path,
+        source_backend,
+        destination_backend,
+    );
+
+    if can_use_rename {
+        destination_backend.rename_within(
+            source_backend,
+            &operation.source_path,
+            &operation.destination_path,
+            &operation.source_snapshot,
+            on_progress,
+        )?;
+    } else if operation.source_path.kind() == operation.destination_path.kind() {
         destination_backend.transfer_between(
             source_backend,
             &operation.source_path,
@@ -2059,6 +2161,21 @@ fn execute_one(
         source_backend.remove(&operation.source_path, &operation.source_snapshot)?;
     }
     Ok(())
+}
+
+fn can_rename_within(
+    file_operation: FileOperation,
+    source: &StoragePath,
+    destination: &StoragePath,
+    source_backend: &dyn StorageBackend,
+    destination_backend: &dyn StorageBackend,
+) -> bool {
+    file_operation == FileOperation::Move
+        && source.kind() == destination.kind()
+        && source.kind() == source_backend.kind()
+        && destination.kind() == destination_backend.kind()
+        && source != destination
+        && source_backend.same_namespace(destination_backend)
 }
 
 fn validate_local_source_containers(plan: &StoragePlan) -> Result<(), StorageError> {
@@ -2154,6 +2271,23 @@ fn copy_local_file(
         });
     }
     Ok(())
+}
+
+fn is_cross_device_error(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::CrossesDevices || {
+        #[cfg(unix)]
+        {
+            error.raw_os_error() == Some(18)
+        }
+        #[cfg(windows)]
+        {
+            error.raw_os_error() == Some(17)
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            false
+        }
+    }
 }
 
 fn validate_local_destination_parent(path: &Path) -> Result<(), StorageError> {
@@ -2301,6 +2435,7 @@ fn sanitize_display(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::{MediaType, TmdbId};
     use tempfile::tempdir;
 
     #[test]
@@ -2417,5 +2552,143 @@ mod tests {
         assert_eq!(fs::read(&source).unwrap(), b"video bytes");
         assert_eq!(fs::read(destination).unwrap(), b"video bytes");
         assert!(!progress.is_empty());
+    }
+
+    #[test]
+    fn same_storage_move_uses_the_rename_path_only_for_matching_namespaces() {
+        let local = LocalStorage::new();
+        let source = StoragePath::Local(PathBuf::from("/media/source.mkv"));
+        let destination = StoragePath::Local(PathBuf::from("/media/out/organized.mkv"));
+
+        assert!(can_rename_within(
+            FileOperation::Move,
+            &source,
+            &destination,
+            &local,
+            &local
+        ));
+        assert!(!can_rename_within(
+            FileOperation::Copy,
+            &source,
+            &destination,
+            &local,
+            &local
+        ));
+
+        let source_config = S3Config::new(
+            "source".to_owned(),
+            "access".to_owned(),
+            "secret".to_owned(),
+            "shared-bucket".to_owned(),
+            "https://s3.example.test".to_owned(),
+            "us-east-1".to_owned(),
+        )
+        .unwrap();
+        let destination_config = S3Config::new(
+            "destination".to_owned(),
+            "access".to_owned(),
+            "secret".to_owned(),
+            "shared-bucket".to_owned(),
+            "https://s3.example.test".to_owned(),
+            "us-east-1".to_owned(),
+        )
+        .unwrap();
+        let source_backend = S3Storage::new(&source_config).unwrap();
+        let destination_backend = S3Storage::new(&destination_config).unwrap();
+        let source_key = StoragePath::S3("incoming/source.mkv".to_owned());
+        let destination_key = StoragePath::S3("organized/target.mkv".to_owned());
+
+        assert!(can_rename_within(
+            FileOperation::Move,
+            &source_key,
+            &destination_key,
+            &source_backend,
+            &destination_backend
+        ));
+        assert!(!can_rename_within(
+            FileOperation::Move,
+            &source_key,
+            &source_key,
+            &source_backend,
+            &destination_backend
+        ));
+
+        let different_bucket_config = S3Config::new(
+            "different".to_owned(),
+            "access".to_owned(),
+            "secret".to_owned(),
+            "different-bucket".to_owned(),
+            "https://s3.example.test".to_owned(),
+            "us-east-1".to_owned(),
+        )
+        .unwrap();
+        let different_bucket = S3Storage::new(&different_bucket_config).unwrap();
+        assert!(!can_rename_within(
+            FileOperation::Move,
+            &source_key,
+            &destination_key,
+            &source_backend,
+            &different_bucket
+        ));
+    }
+
+    #[test]
+    fn same_local_storage_move_renames_without_streaming_bytes() {
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("source.mkv");
+        let destination_directory = directory.path().join("out");
+        let destination = destination_directory.join("organized.mkv");
+        fs::create_dir(&destination_directory).unwrap();
+        fs::write(&source, b"video bytes that should not be copied").unwrap();
+
+        let backend = LocalStorage::new();
+        let source_path = StoragePath::Local(source.clone());
+        let snapshot = backend.snapshot(&source_path).unwrap();
+        let source_size = snapshot.size_bytes();
+        let destination_path = StoragePath::Local(destination.clone());
+        let selection = StorageSelection::new(
+            StoragePath::Local(directory.path().to_owned()),
+            StorageDestination::new(StoragePath::Local(destination_directory), true, false),
+            FileOperation::Move,
+            vec![StorageVideoFile::new(
+                source_path.clone(),
+                "source.mkv".to_owned(),
+                Some(source_size),
+            )],
+            "Local source".to_owned(),
+            "Local destination".to_owned(),
+        );
+        let operation = StoragePlannedOperation::new(
+            source_path,
+            destination_path,
+            "source.mkv".to_owned(),
+            "out/organized.mkv".to_owned(),
+            "organized.mkv".to_owned(),
+            TmdbItem {
+                id: TmdbId::new(550).unwrap(),
+                media_type: MediaType::Movie,
+                title: "Fight Club".to_owned(),
+                original_title: None,
+                year: None,
+            },
+            None,
+            VideoExtension::parse("mkv").unwrap(),
+            snapshot,
+        );
+        let plan = StoragePlan::new(&selection, vec![operation]);
+        let mut progress = Vec::new();
+
+        let report = execute_plan_with_progress(&plan, &backend, &backend, |update| {
+            progress.push(update.completed_bytes());
+        })
+        .unwrap();
+
+        assert!(report.is_success());
+        assert_eq!(progress, vec![0, source_size]);
+        assert!(!source.exists());
+        assert_eq!(
+            fs::read(destination).unwrap(),
+            b"video bytes that should not be copied"
+        );
     }
 }

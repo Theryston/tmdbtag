@@ -462,12 +462,17 @@ service-side copy operation.
 
 ### Move safety
 
-Same-volume local moves use a no-replace publication strategy where the platform
-permits it, then remove the source only after the destination is known to exist.
-Cross-volume and cross-storage moves use the same verified temporary-copy
-process as a copy and remove the source only after successful publication. An
-S3-to-S3 move is a conditional server-side copy followed by a conditional delete
-of the original object.
+Same-storage local moves use an O(1) no-replace rename-equivalent that changes
+directory entries without reading or rewriting the video bytes, then remove the
+source only after the destination is revalidated. If the local source and
+destination are on different mounted filesystems, `tmdbtag` falls back to the
+verified temporary-copy process because a native rename is not possible.
+Cross-storage moves use the same verified temporary-copy process as a copy and
+remove the source only after successful publication. An S3-to-S3 move uses the
+service-side equivalent of a rename — conditional `CopyObject` followed by a
+conditional delete — only when both the bucket and endpoint match; it never
+downloads and re-uploads the object through the CLI. Different S3 endpoints
+continue to use the private temporary bridge.
 
 ### Real byte-based progress
 
