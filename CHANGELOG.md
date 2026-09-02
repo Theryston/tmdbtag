@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3](https://github.com/Theryston/tmdbtag/compare/tmdbtag-v0.1.2...tmdbtag-v0.1.3) - 2026-09-02
+
+### Fixed
+
+- support automatic recovery of tagged filenames
+
 ## [0.1.2](https://github.com/Theryston/tmdbtag/compare/tmdbtag-v0.1.1...tmdbtag-v0.1.2) - 2026-09-01
 
 ### Fixed
