@@ -81,7 +81,10 @@ persistence, storage selection, local/S3 discovery and media selection, TMDB
 identification, deterministic naming, typed plan construction, complete
 preview, pre-commit validation, safe local and cross-storage copy/move
 execution with byte-based progress and live transfer-rate display, and
-per-file execution reporting are available.
+per-file execution reporting are available. Move plans can also optionally
+delete the immediate source folder (or S3 prefix) after the last selected file
+or selected descendant in that container succeeds; the source root remains
+protected.
 Future retrieval commands, non-interactive modes, and auxiliary-file support
 remain intentionally out of scope.
 
@@ -353,6 +356,14 @@ Naming rules:
 - Report aggregate progress as completed or transferred source bytes divided by
   the total source bytes in the plan.
 - Preserve every source when a copy cannot be verified.
+- For `Move` only, `Delete folders after action?` may authorize recursive removal
+  of each selected video's immediate containing folder. Remove a folder only
+  after its last selected file or selected descendant has completed successfully;
+  never remove the local source root or selected S3 prefix root.
+- Treat folder cleanup as a destructive plan action: show a warning in the
+  preview, revalidate the target, and stop later operations if cleanup fails.
+- A cleanup may remove unselected files and subfolders inside the authorized
+  folder. Copy plans must never delete source files or folders.
 
 ## Engineering principles
 
@@ -733,16 +744,18 @@ It should coordinate:
    than one saved entry exists;
 6. collecting the per-run S3 source prefix and destination prefix;
 7. operation selection (`Copy` or `Move`);
-8. backend-specific destination selection;
-9. one recursive video discovery with destination-prefix exclusion;
-10. one unified expandable video-file selection;
-11. canonical filename recovery and TMDB verification for already tagged files;
-12. interactive TMDB identification for files that still need metadata;
-13. series episode input for non-recovered series files;
-14. plan construction;
-15. full validation;
-16. preview and confirmation;
-17. local, S3, or cross-storage copy/move execution and final reporting.
+8. the optional Move-only recursive source-folder cleanup choice;
+9. backend-specific destination selection;
+10. one recursive video discovery with destination-prefix exclusion;
+11. one unified expandable video-file selection;
+12. canonical filename recovery and TMDB verification for already tagged files;
+13. interactive TMDB identification for files that still need metadata;
+14. series episode input for non-recovered series files;
+15. plan construction;
+16. full validation;
+17. preview and confirmation;
+18. local, S3, or cross-storage copy/move execution, optional cleanup, and
+    final reporting.
 
 It should depend on abstractions or focused modules, not on terminal-specific
 implementation details.
@@ -768,10 +781,13 @@ It should:
   exposing credentials;
 - expose `storage add` and `storage remove` as separate clap subcommands;
 - collect the explicit copy-or-move operation choice;
+- collect the Move-only `Delete folders after action?` choice with a negative
+  default;
 - render the debounced live TMDB query/result selector while receiving search
   behavior through an application-supplied callback;
 - show step indicators, byte-based transfer progress, previews, warnings, errors,
   and reports;
+- show an explicit recursive source-folder deletion warning in Move previews;
 - translate typed application results into consistent English user-facing
   messages;
 - expose cancellation as a normal control-flow result;
@@ -991,6 +1007,8 @@ It should provide focused operations such as:
   temporary file, verification, and no-replace publication;
 - execute a safe same-volume move;
 - execute a safe cross-volume move fallback;
+- validate and recursively remove an immediate source folder after the last
+  selected file in that folder completes a Move;
 - report aggregate transfer progress as completed bytes and total plan bytes;
 - produce per-file results.
 
@@ -1007,6 +1025,11 @@ Discovery functions are read-only. They must not create the deferred
 destination or perform any rename, copy, delete, or move. The application layer
 may prompt for the destination and selections, but it must retain the exact
 `PathBuf` values returned by this adapter for later near-commit revalidation.
+
+Source-folder cleanup is an execution-time mutation, never a discovery side
+effect. The filesystem layer must protect the source root, refuse symlink or
+non-directory cleanup targets, use a recursive operation that does not follow
+symlink targets, and stop later plan operations when cleanup fails.
 
 Use Rust filesystem APIs directly. Shelling out creates quoting, platform,
 error-reporting, and security problems.
@@ -1051,6 +1074,14 @@ The contract must keep these concerns explicit:
 - all move implementations must revalidate the source snapshot immediately
   before deletion and must preserve the source when verification or publication
   fails.
+- source-folder cleanup must remain behind the storage abstraction: local
+  cleanup removes a real immediate directory without following symbolic links,
+  while S3 cleanup lists and removes the corresponding immediate virtual
+  prefix;
+- cleanup must be validated as a nested source container before execution and
+  revalidated immediately before recursive removal;
+- S3 prefix cleanup must paginate through all objects and must never target the
+  selected source-prefix root or an overlapping destination prefix.
 
 The storage module must not import clap, dialoguer, crossterm, or terminal
 rendering types. It may use the AWS SDK and Tokio internally, but no AWS SDK
@@ -1147,6 +1178,9 @@ The following invariants must be enforced by code, not left as comments.
   video-extension allowlist.
 - Every selected source file belongs to one internal source container derived
   from its exact path.
+- The cleanup container, when requested for a Move, is the immediate parent
+  directory or object-key prefix of the selected file, not the broad source
+  root or a top-level display grouping.
 - No source file appears more than once in a plan.
 - Every selected source file has exactly one confirmed TMDB item.
 - A movie operation has no episode reference.
@@ -1171,6 +1205,10 @@ The following invariants must be enforced by code, not left as comments.
   execution must use that stored value rather than infer it later.
 - Every plan item has one source and one destination.
 - Every plan item has verified media metadata.
+- A plan's recursive source-folder cleanup choice is explicit and immutable;
+  it is effective only for Move and is evaluated per immediate source
+  container. A pending selected descendant also postpones cleanup because the
+  removal is recursive.
 - Every destination is unique within the plan.
 - No destination exists at commit time according to the strongest safe check
   available on the host.
@@ -1367,19 +1405,23 @@ For a normal interactive invocation, the exact high-level order is:
     and destination bucket for their respective S3 roles;
 12. the UI collects an optional S3 source prefix when the source is S3;
 13. the UI asks whether to copy or move;
-14. the UI asks for the backend-specific destination (local directory or
+14. when the operation is Move, the UI asks `Delete folders after action?` with
+    a negative default;
+15. the UI asks for the backend-specific destination (local directory or
     optional S3 destination prefix);
-15. the selected storage adapter recursively discovers recognized videos and
+16. the selected storage adapter recursively discovers recognized videos and
     excludes the destination subtree or prefix;
-16. the UI presents one collapsed-by-default expandable explorer and collects
+17. the UI presents one collapsed-by-default expandable explorer and collects
     selected video files;
-17. the UI runs the identification loop for every selected video file;
-18. the UI collects season and episode for each file identified as a series;
-19. the application builds and validates the complete plan;
-20. the UI displays the complete preview, including total source bytes;
-21. the UI asks for explicit confirmation;
-22. the executor performs the approved local, S3, or cross-storage copy or
-    move and the UI shows byte progress and the final report.
+18. the UI runs the identification loop for every selected video file;
+19. the UI collects season and episode for each file identified as a series;
+20. the application builds and validates the complete plan;
+21. the UI displays the complete preview, including total source bytes and a
+    recursive-cleanup warning when enabled;
+22. the UI asks for explicit confirmation;
+23. the executor performs the approved local, S3, or cross-storage copy or
+    move, performs eligible cleanup, and the UI shows byte progress and the
+    final report.
 
 When both configuration fields are missing, the API-key and language questions
 happen in that order before destination or media discovery. If the configuration
@@ -1446,6 +1488,10 @@ The interactive contract must also make the multi-bucket workflow explicit:
   selected bucket root;
 - these prefixes are execution inputs and must not be written into the saved
   credential catalog.
+- the Move-only source-folder cleanup question is a separate confirmation
+  choice, has a negative default, and is not shown for Copy;
+- the preview must state that enabled cleanup deletes the immediate source
+  folder or virtual prefix recursively, including unselected contents.
 
 Storage locations shown by the interactive UI must be relative display values.
 Show local explorer rows relative to the current source root, S3 explorer rows
@@ -1497,6 +1543,7 @@ Provide, where supported by the selected terminal UI library:
 - clear selection counts;
 - aligned source/destination preview tables;
 - distinct success, warning, error, and informational styles;
+- an unmistakable warning when a Move will recursively delete source folders;
 - a determinate aggregate byte-progress bar for file copies and moves, with a
   live decimal transfer-rate estimate beside it, plus status feedback for
   network requests;
@@ -1552,6 +1599,13 @@ During execution:
 - report the exact state of the affected file;
 - stop new operations by default if continuing would make the result less
   predictable.
+
+Recursive source-folder cleanup is part of the approved mutation sequence. It
+must occur only after the current file's destination publication and source
+removal succeed, only for the last selected file in that immediate container
+or any of its descendants, and never for the source root. If cleanup fails,
+report the completed file as failed for the overall operation and leave later
+files pending.
 
 ### Output quality
 
@@ -1637,6 +1691,10 @@ Plan validation should verify:
 - no destination escapes the chosen destination directory;
 - the destination can be created if needed;
 - required permissions are present where they can be checked.
+- when Move cleanup is enabled, each distinct immediate source folder is a
+  real nested directory or a valid nested S3 prefix;
+- an enabled cleanup target cannot be the source root, bucket root, or a
+  destination namespace that would be deleted by the cleanup.
 
 Revalidate as close as practical to commit because directory state can change
 after preview.
@@ -1734,6 +1792,12 @@ where safe.
 If verification fails, the source must remain. If publication succeeds but
 source removal fails, report a partial result rather than pretending the
 operation was a normal move.
+
+When folder cleanup is enabled, recursive removal is a separate final step for
+the operation whose source is the last selected file in that immediate
+container or any of its descendants. Do not remove the folder before the file
+move has completed and do not mark the operation successful until the
+requested cleanup has succeeded.
 
 ### Transfer progress
 
@@ -2006,6 +2070,14 @@ Use temporary directories for:
 - existing-destination conflicts;
 - cancellation with no changes;
 - source preservation after failures;
+- Move cleanup of the immediate containing folder, including unselected
+  contents;
+- multiple selected videos in one folder delete that folder only after the
+  last selected video or selected descendant completes;
+- root-level selected videos never delete the source root;
+- Copy never deletes a source folder even if a cleanup flag is accidentally
+  present in a lower-level plan fixture;
+- cleanup failure stops later operations and produces a partial report;
 - report contents after partial execution.
 
 The filesystem test suite also forces the cross-volume executor through its test
@@ -2060,6 +2132,8 @@ Cover at least:
 - preview differs after correction and must be reconfirmed;
 - preflight conflict blocks all file operations;
 - operation selection is retained through preview and execution;
+- the cleanup choice is retained in the immutable plan and appears in the
+  preview;
 - unexpected failure stops remaining work and reports partial state.
 
 ### Test naming
@@ -2314,8 +2388,20 @@ Before any destructive operation:
 - use no-overwrite behavior;
 - preserve the source until the destination is verified.
 
-Never add a cleanup pass that deletes “unrecognized” files. That is outside the
-project scope.
+The optional Move cleanup is intentionally broader than file removal: after
+the last selected video in an immediate source folder or one of its descendants
+succeeds, it may delete that entire folder and all of its contents. Therefore:
+
+- ask `Delete folders after action?` only for Move and default it to no;
+- show the cleanup behavior and its recursive effect in the preview;
+- never infer that a folder is safe merely because it contains no other
+  recognized videos;
+- protect the source root and the selected S3 prefix root;
+- refuse symlink cleanup roots and never follow symlink targets while deleting;
+- stop later operations if a requested folder cleanup fails.
+
+Never add an implicit cleanup pass that deletes unrecognized files or folders
+without this explicit user choice. That remains outside the project scope.
 
 ## Documentation rules
 

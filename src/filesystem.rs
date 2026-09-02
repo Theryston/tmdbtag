@@ -580,6 +580,7 @@ pub fn validate_operation_plan(plan: &OperationPlan) -> Result<(), FilesystemErr
         destination_paths.push(operation.destination_path().to_owned());
     }
 
+    validate_source_folder_cleanup(plan)?;
     Ok(())
 }
 
@@ -834,6 +835,12 @@ where
 
         match execution_result {
             Ok(()) => {
+                if let Err(error) = remove_source_folder_after_operation(plan, index) {
+                    statuses[index] = OperationStatus::Failed {
+                        reason: error.to_string(),
+                    };
+                    break;
+                }
                 completed_bytes = completed_bytes.saturating_add(current_file_total);
                 on_progress(TransferProgress::new(
                     index,
@@ -930,6 +937,76 @@ fn validate_operation_at_commit(
     validate_source_folder(operation.source_folder())?;
     validate_source_operation(operation)?;
     validate_destination_path(plan, operation)
+}
+
+fn validate_source_folder_cleanup(plan: &OperationPlan) -> Result<(), FilesystemError> {
+    if !plan.delete_source_folders() || plan.operation() != FileOperation::Move {
+        return Ok(());
+    }
+
+    let source_root = plan.source_root().path();
+    let mut folders = Vec::new();
+    for operation in plan.operations() {
+        let Some(folder) = direct_source_directory(operation.source_path(), source_root) else {
+            continue;
+        };
+        if folders
+            .iter()
+            .any(|known: &PathBuf| paths_equivalent(known, &folder))
+        {
+            continue;
+        }
+        if !path_is_same_or_descendant(&folder, source_root) {
+            return Err(FilesystemError::SourceFolderMismatch {
+                source_path: operation.source_path().to_owned(),
+                folder,
+            });
+        }
+        validate_source_folder(&folder)?;
+        if paths_equivalent(plan.destination().path(), &folder)
+            || path_is_same_or_descendant(plan.destination().path(), &folder)
+        {
+            return Err(FilesystemError::DestinationIsSelectedSource {
+                path: plan.destination().path().to_owned(),
+            });
+        }
+        folders.push(folder);
+    }
+    Ok(())
+}
+
+fn remove_source_folder_after_operation(
+    plan: &OperationPlan,
+    operation_index: usize,
+) -> Result<(), FilesystemError> {
+    if !plan.delete_source_folders() || plan.operation() != FileOperation::Move {
+        return Ok(());
+    }
+
+    let operation = &plan.operations()[operation_index];
+    let source_root = plan.source_root().path();
+    let Some(folder) = direct_source_directory(operation.source_path(), source_root) else {
+        return Ok(());
+    };
+    let has_later_file_in_folder = plan
+        .operations()
+        .iter()
+        .skip(operation_index + 1)
+        .any(|later| path_is_same_or_descendant(later.source_path(), &folder));
+    if has_later_file_in_folder {
+        return Ok(());
+    }
+
+    validate_source_folder(&folder)?;
+    fs::remove_dir_all(&folder).map_err(|cause| FilesystemError::SourceFolderRemoval {
+        path: folder,
+        cause,
+    })
+}
+
+fn direct_source_directory(path: &Path, source_root: &Path) -> Option<PathBuf> {
+    let folder = path.parent()?.to_owned();
+    (!paths_equivalent(&folder, source_root)).then_some(folder)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2090,6 +2167,150 @@ mod tests {
         assert!(sources[1].exists());
         assert!(sources[2].exists());
         assert_eq!(fs::read_to_string(late_conflict).unwrap(), "late conflict");
+    }
+
+    #[test]
+    fn move_can_delete_the_immediate_source_folder_after_its_last_selected_file() {
+        let directory = tempdir().unwrap();
+        let source_root = directory.path().join("library");
+        let source_container = source_root.join("show").join("season-01");
+        let destination = directory.path().join("organized");
+        let first_source = source_container.join("episode-01.mkv");
+        let second_source = source_container.join("episode-02.mp4");
+        fs::create_dir_all(&source_container).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(&first_source, "episode one").unwrap();
+        fs::write(&second_source, "episode two").unwrap();
+        fs::write(source_container.join("unselected.txt"), "also removed").unwrap();
+
+        let plan = operation_plan(
+            &source_root,
+            &destination,
+            true,
+            vec![
+                planned_operation(
+                    &source_root.join("show"),
+                    &first_source,
+                    &destination,
+                    "first.mkv",
+                ),
+                planned_operation(
+                    &source_root.join("show"),
+                    &second_source,
+                    &destination,
+                    "second.mp4",
+                ),
+            ],
+        )
+        .with_delete_source_folders(true);
+
+        let report = execute_operation_plan(&plan).unwrap();
+
+        assert!(report.is_success());
+        assert!(destination.join("first.mkv").is_file());
+        assert!(destination.join("second.mp4").is_file());
+        assert!(!source_container.exists());
+        assert!(source_root.join("show").is_dir());
+    }
+
+    #[test]
+    fn a_selected_video_in_a_nested_folder_delays_parent_cleanup() {
+        let directory = tempdir().unwrap();
+        let source_root = directory.path().join("library");
+        let parent_folder = source_root.join("show");
+        let nested_folder = parent_folder.join("season-01");
+        let destination = directory.path().join("organized");
+        let parent_source = parent_folder.join("special.mkv");
+        let nested_source = nested_folder.join("episode-01.mkv");
+        fs::create_dir_all(&nested_folder).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(&parent_source, "special").unwrap();
+        fs::write(&nested_source, "episode").unwrap();
+
+        let plan = operation_plan(
+            &source_root,
+            &destination,
+            true,
+            vec![
+                planned_operation(&parent_folder, &parent_source, &destination, "special.mkv"),
+                planned_operation(
+                    &parent_folder,
+                    &nested_source,
+                    &destination,
+                    "episode-01.mkv",
+                ),
+            ],
+        )
+        .with_delete_source_folders(true);
+
+        let report = execute_operation_plan(&plan).unwrap();
+
+        assert!(report.is_success());
+        assert!(destination.join("special.mkv").is_file());
+        assert!(destination.join("episode-01.mkv").is_file());
+        assert!(parent_folder.is_dir());
+        assert!(!nested_folder.exists());
+    }
+
+    #[test]
+    fn source_root_is_never_deleted_for_a_root_level_video() {
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("root-video.mkv");
+        let destination = directory.path().join("organized");
+        fs::write(&source, "root video").unwrap();
+        fs::create_dir(&destination).unwrap();
+
+        let plan = operation_plan(
+            directory.path(),
+            &destination,
+            true,
+            vec![planned_operation(
+                directory.path(),
+                &source,
+                &destination,
+                "root-video.mkv",
+            )],
+        )
+        .with_delete_source_folders(true);
+
+        let report = execute_operation_plan(&plan).unwrap();
+
+        assert!(report.is_success());
+        assert!(directory.path().is_dir());
+        assert!(!source.exists());
+        assert!(destination.join("root-video.mkv").is_file());
+    }
+
+    #[test]
+    fn copy_ignores_source_folder_cleanup_and_preserves_the_source_tree() {
+        let directory = tempdir().unwrap();
+        let source_folder = directory.path().join("movies");
+        let source = source_folder.join("movie.mkv");
+        let destination = directory.path().join("organized");
+        fs::create_dir(&source_folder).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(&source, "movie").unwrap();
+
+        let plan = operation_plan_with_mode(
+            directory.path(),
+            &destination,
+            true,
+            FileOperation::Copy,
+            vec![planned_operation(
+                &source_folder,
+                &source,
+                &destination,
+                "movie.mkv",
+            )],
+        )
+        .with_delete_source_folders(true);
+
+        let report = execute_operation_plan(&plan).unwrap();
+
+        assert!(report.is_success());
+        assert!(source.is_file());
+        assert!(source_folder.is_dir());
+        assert!(destination.join("movie.mkv").is_file());
     }
 
     fn contains_temporary_file(directory: &Path) -> bool {

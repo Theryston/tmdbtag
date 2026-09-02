@@ -89,6 +89,22 @@ impl StoragePath {
         }
     }
 
+    /// Returns the direct containing directory or virtual S3 prefix for this path.
+    ///
+    /// The returned value is intentionally only the immediate container. The organization
+    /// workflow uses it to delete the folder that held a selected video, while the source root
+    /// is filtered separately so root-level videos can never cause the current directory or
+    /// bucket root to be removed.
+    pub fn parent_container(&self) -> Option<Self> {
+        match self {
+            Self::Local(path) => path.parent().map(|parent| Self::Local(parent.to_owned())),
+            Self::S3(key) => key
+                .trim_end_matches('/')
+                .rsplit_once('/')
+                .map(|(parent, _)| Self::S3(parent.to_owned())),
+        }
+    }
+
     /// Joins one generated filename without allowing it to escape the destination root.
     pub fn join_filename(&self, filename: &str) -> Result<Self, StorageError> {
         if filename.is_empty()
@@ -239,6 +255,7 @@ pub struct StorageSelection {
     files: Vec<StorageVideoFile>,
     source_description: String,
     destination_description: String,
+    delete_source_folders: bool,
 }
 
 impl StorageSelection {
@@ -259,7 +276,14 @@ impl StorageSelection {
             files,
             source_description,
             destination_description,
+            delete_source_folders: false,
         }
+    }
+
+    /// Associates the confirmed folder-cleanup choice with this storage selection.
+    pub fn with_delete_source_folders(mut self, delete_source_folders: bool) -> Self {
+        self.delete_source_folders = delete_source_folders;
+        self
     }
 
     /// Returns the source storage root.
@@ -290,6 +314,11 @@ impl StorageSelection {
     /// Returns the destination label used in previews.
     pub fn destination_description(&self) -> &str {
         &self.destination_description
+    }
+
+    /// Returns whether containing source folders should be deleted after successful moves.
+    pub const fn delete_source_folders(&self) -> bool {
+        self.delete_source_folders
     }
 }
 
@@ -425,6 +454,7 @@ pub struct StoragePlan {
     source_description: String,
     destination_description: String,
     operations: Vec<StoragePlannedOperation>,
+    delete_source_folders: bool,
 }
 
 impl StoragePlan {
@@ -437,6 +467,7 @@ impl StoragePlan {
             source_description: selection.source_description.clone(),
             destination_description: selection.destination_description.clone(),
             operations,
+            delete_source_folders: selection.delete_source_folders,
         }
     }
 
@@ -480,6 +511,12 @@ impl StoragePlan {
         self.operations.iter().fold(0, |total, operation| {
             total.saturating_add(operation.source_snapshot.size_bytes())
         })
+    }
+
+    /// Returns whether successful moves should recursively delete selected files' containing
+    /// folders after the last selected file or selected descendant in each folder completes.
+    pub const fn delete_source_folders(&self) -> bool {
+        self.delete_source_folders
     }
 }
 
@@ -797,6 +834,24 @@ pub trait StorageBackend {
 
     /// Removes a source only when its planned snapshot still matches.
     fn remove(&self, source: &StoragePath, snapshot: &StorageSnapshot) -> Result<(), StorageError>;
+
+    /// Validates a direct source container before an optional recursive cleanup.
+    ///
+    /// The source root is supplied as an explicit guard so a root-level video can never turn the
+    /// current directory or bucket root into a deletion target.
+    fn validate_source_container(
+        &self,
+        source_container: &StoragePath,
+        source_root: &StoragePath,
+    ) -> Result<(), StorageError>;
+
+    /// Recursively removes one direct source container after its last selected file or descendant
+    /// succeeds.
+    fn remove_source_container(
+        &self,
+        source_container: &StoragePath,
+        source_root: &StoragePath,
+    ) -> Result<(), StorageError>;
 }
 
 /// The local filesystem implementation of [`StorageBackend`].
@@ -1168,6 +1223,57 @@ impl StorageBackend for LocalStorage {
         }
         fs::remove_file(source_path).map_err(|error| StorageError::SourceRemoval {
             path: source_path.to_string_lossy().into_owned(),
+            message: error.to_string(),
+        })
+    }
+
+    fn validate_source_container(
+        &self,
+        source_container: &StoragePath,
+        source_root: &StoragePath,
+    ) -> Result<(), StorageError> {
+        let source_container = self.local_path(source_container)?;
+        let source_root = self.local_path(source_root)?;
+        if paths_equivalent(source_container, source_root)
+            || !path_is_same_or_descendant(source_container, source_root)
+        {
+            return Err(StorageError::InvalidPath {
+                path: relative_local_path(source_container, source_root),
+                reason: "the source folder cleanup target must be a nested folder, not the source root",
+            });
+        }
+
+        match fs::symlink_metadata(source_container) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                Err(StorageError::InvalidPath {
+                    path: relative_local_path(source_container, source_root),
+                    reason: "the source folder cleanup target must be a real directory",
+                })
+            }
+            Ok(_) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                Err(StorageError::SourceFolderRemoval {
+                    path: relative_local_path(source_container, source_root),
+                    message: "the source folder no longer exists".to_owned(),
+                })
+            }
+            Err(error) => Err(StorageError::Local {
+                operation: "validating the source folder cleanup target",
+                message: error.to_string(),
+            }),
+        }
+    }
+
+    fn remove_source_container(
+        &self,
+        source_container: &StoragePath,
+        source_root: &StoragePath,
+    ) -> Result<(), StorageError> {
+        self.validate_source_container(source_container, source_root)?;
+        let source_container = self.local_path(source_container)?;
+        let source_root = self.local_path(source_root)?;
+        fs::remove_dir_all(source_container).map_err(|error| StorageError::SourceFolderRemoval {
+            path: relative_local_path(source_container, source_root),
             message: error.to_string(),
         })
     }
@@ -1722,6 +1828,78 @@ impl StorageBackend for S3Storage {
             .map_err(|error| map_s3_error(&error, "removing the source object from S3"))?;
         Ok(())
     }
+
+    fn validate_source_container(
+        &self,
+        source_container: &StoragePath,
+        source_root: &StoragePath,
+    ) -> Result<(), StorageError> {
+        let source_container = self.s3_key(source_container)?;
+        let source_root = self.s3_key(source_root)?;
+        if source_container.is_empty()
+            || source_container == source_root
+            || !s3_key_is_same_or_descendant(source_container, source_root)
+        {
+            return Err(StorageError::InvalidPath {
+                path: sanitize_display(source_container),
+                reason: "the source prefix cleanup target must be a nested prefix, not the source root",
+            });
+        }
+        Ok(())
+    }
+
+    fn remove_source_container(
+        &self,
+        source_container: &StoragePath,
+        source_root: &StoragePath,
+    ) -> Result<(), StorageError> {
+        self.validate_source_container(source_container, source_root)?;
+        let container_key = self.s3_key(source_container)?;
+        let prefix = format!("{container_key}/");
+        let mut continuation_token = None;
+        let mut objects = Vec::new();
+
+        // S3 folders are virtual. Delete every object below the direct source prefix, including
+        // unselected objects, only after the last selected video in or below that prefix has
+        // published.
+        loop {
+            let mut request = self
+                .client
+                .list_objects_v2()
+                .bucket(&self.bucket)
+                .prefix(&prefix);
+            if let Some(token) = continuation_token.as_deref() {
+                request = request.continuation_token(token);
+            }
+            let response = self.runtime.block_on(request.send()).map_err(|error| {
+                map_s3_error(&error, "listing the source S3 prefix for cleanup")
+            })?;
+
+            for object in response.contents() {
+                let Some(key) = object.key() else {
+                    continue;
+                };
+                objects.push((key.to_owned(), object.e_tag().map(ToOwned::to_owned)));
+            }
+
+            continuation_token = response.next_continuation_token().map(ToOwned::to_owned);
+            if continuation_token.is_none() {
+                break;
+            }
+        }
+
+        for (key, etag) in objects {
+            let mut delete = self.client.delete_object().bucket(&self.bucket).key(key);
+            if let Some(etag) = etag.as_deref() {
+                delete = delete.if_match(etag);
+            }
+            self.runtime
+                .block_on(delete.send())
+                .map_err(|error| map_s3_error(&error, "deleting the source S3 prefix contents"))?;
+        }
+
+        Ok(())
+    }
 }
 
 impl S3Storage {
@@ -1967,6 +2145,7 @@ pub fn validate_plan(
     }
 
     validate_local_source_containers(plan)?;
+    validate_source_container_cleanup(plan, source_backend, destination_backend)?;
     Ok(())
 }
 
@@ -2024,6 +2203,25 @@ where
             &mut report_progress,
         ) {
             Ok(()) => {
+                if let Err(error) =
+                    remove_source_container_after_operation(plan, index, source_backend)
+                {
+                    results.push(StorageOperationResult::new(
+                        operation.source_display.clone(),
+                        operation.destination_display.clone(),
+                        OperationStatus::Failed {
+                            reason: error.to_string(),
+                        },
+                    ));
+                    for pending in plan.operations.iter().skip(index + 1) {
+                        results.push(StorageOperationResult::new(
+                            pending.source_display.clone(),
+                            pending.destination_display.clone(),
+                            OperationStatus::Pending,
+                        ));
+                    }
+                    break;
+                }
                 completed_bytes = completed_bytes.saturating_add(file_total).min(total_bytes);
                 on_progress(StorageTransferProgress::new(
                     index,
@@ -2187,6 +2385,93 @@ fn can_rename_within(
         && destination.kind() == destination_backend.kind()
         && source != destination
         && source_backend.same_namespace(destination_backend)
+}
+
+fn validate_source_container_cleanup(
+    plan: &StoragePlan,
+    source_backend: &dyn StorageBackend,
+    destination_backend: &dyn StorageBackend,
+) -> Result<(), StorageError> {
+    if !plan.delete_source_folders() || plan.operation() != FileOperation::Move {
+        return Ok(());
+    }
+
+    let mut containers = Vec::new();
+    for operation in &plan.operations {
+        let Some(container) = direct_storage_container(&operation.source_path, &plan.source_root)
+        else {
+            continue;
+        };
+        if containers
+            .iter()
+            .any(|known: &StoragePath| storage_paths_equivalent(known, &container))
+        {
+            continue;
+        }
+
+        source_backend.validate_source_container(&container, &plan.source_root)?;
+        if source_backend.same_namespace(destination_backend)
+            && storage_path_is_same_or_descendant(plan.destination.path(), &container)
+        {
+            return Err(StorageError::InvalidPath {
+                path: plan.destination.path.display(),
+                reason: "the destination cannot be inside a source folder scheduled for cleanup",
+            });
+        }
+        containers.push(container);
+    }
+    Ok(())
+}
+
+fn remove_source_container_after_operation(
+    plan: &StoragePlan,
+    operation_index: usize,
+    source_backend: &dyn StorageBackend,
+) -> Result<(), StorageError> {
+    if !plan.delete_source_folders() || plan.operation() != FileOperation::Move {
+        return Ok(());
+    }
+
+    let operation = &plan.operations[operation_index];
+    let Some(container) = direct_storage_container(&operation.source_path, &plan.source_root)
+    else {
+        return Ok(());
+    };
+    let has_later_file_in_container = plan
+        .operations
+        .iter()
+        .skip(operation_index + 1)
+        .any(|later| storage_path_is_same_or_descendant(&later.source_path, &container));
+    if has_later_file_in_container {
+        return Ok(());
+    }
+
+    source_backend.remove_source_container(&container, &plan.source_root)
+}
+
+fn direct_storage_container(path: &StoragePath, source_root: &StoragePath) -> Option<StoragePath> {
+    let container = path.parent_container()?;
+    (!storage_paths_equivalent(&container, source_root)).then_some(container)
+}
+
+fn storage_paths_equivalent(left: &StoragePath, right: &StoragePath) -> bool {
+    match (left, right) {
+        (StoragePath::Local(left), StoragePath::Local(right)) => paths_equivalent(left, right),
+        (StoragePath::S3(left), StoragePath::S3(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn storage_path_is_same_or_descendant(path: &StoragePath, ancestor: &StoragePath) -> bool {
+    match (path, ancestor) {
+        (StoragePath::Local(path), StoragePath::Local(ancestor)) => {
+            paths_equivalent(path, ancestor) || path_is_same_or_descendant(path, ancestor)
+        }
+        (StoragePath::S3(path), StoragePath::S3(ancestor)) => {
+            s3_key_is_same_or_descendant(path, ancestor)
+        }
+        _ => false,
+    }
 }
 
 fn validate_local_source_containers(plan: &StoragePlan) -> Result<(), StorageError> {
@@ -2381,6 +2666,12 @@ fn relative_s3_key(key: &str, root: &str) -> String {
     key.strip_prefix(&format!("{root}/"))
         .unwrap_or(key)
         .to_owned()
+}
+
+fn s3_key_is_same_or_descendant(key: &str, ancestor: &str) -> bool {
+    key == ancestor
+        || (!ancestor.is_empty() && key.starts_with(&format!("{ancestor}/")))
+        || (ancestor.is_empty() && !key.is_empty())
 }
 
 fn join_s3_key(prefix: &str, child: &str) -> String {
@@ -2701,5 +2992,98 @@ mod tests {
             fs::read(destination).unwrap(),
             b"video bytes that should not be copied"
         );
+    }
+
+    #[test]
+    fn local_storage_cleanup_removes_a_folder_only_after_its_last_selected_file() {
+        let directory = tempdir().unwrap();
+        let source_folder = directory.path().join("episodes");
+        let destination_folder = directory.path().join("organized");
+        let first = source_folder.join("first.mkv");
+        let second = source_folder.join("second.mp4");
+        fs::create_dir(&source_folder).unwrap();
+        fs::create_dir(&destination_folder).unwrap();
+        fs::write(&first, "first episode").unwrap();
+        fs::write(&second, "second episode").unwrap();
+        fs::write(source_folder.join("unselected.txt"), "also removed").unwrap();
+
+        let backend = LocalStorage::new();
+        let first_path = StoragePath::Local(first.clone());
+        let second_path = StoragePath::Local(second.clone());
+        let first_snapshot = backend.snapshot(&first_path).unwrap();
+        let second_snapshot = backend.snapshot(&second_path).unwrap();
+        let selection = StorageSelection::new(
+            StoragePath::Local(directory.path().to_owned()),
+            StorageDestination::new(StoragePath::Local(destination_folder.clone()), true, false),
+            FileOperation::Move,
+            vec![
+                StorageVideoFile::new(
+                    first_path.clone(),
+                    "episodes/first.mkv".to_owned(),
+                    Some(13),
+                ),
+                StorageVideoFile::new(
+                    second_path.clone(),
+                    "episodes/second.mp4".to_owned(),
+                    Some(14),
+                ),
+            ],
+            "Local source".to_owned(),
+            "Local destination".to_owned(),
+        )
+        .with_delete_source_folders(true);
+        let first_operation = StoragePlannedOperation::new(
+            first_path,
+            StoragePath::Local(destination_folder.join("first.mkv")),
+            "episodes/first.mkv".to_owned(),
+            "first.mkv".to_owned(),
+            "first.mkv".to_owned(),
+            test_movie_item(),
+            None,
+            VideoExtension::parse("mkv").unwrap(),
+            first_snapshot,
+        );
+        let second_operation = StoragePlannedOperation::new(
+            second_path,
+            StoragePath::Local(destination_folder.join("second.mp4")),
+            "episodes/second.mp4".to_owned(),
+            "second.mp4".to_owned(),
+            "second.mp4".to_owned(),
+            test_movie_item(),
+            None,
+            VideoExtension::parse("mp4").unwrap(),
+            second_snapshot,
+        );
+        let plan = StoragePlan::new(&selection, vec![first_operation, second_operation]);
+
+        let report = execute_plan_with_progress(&plan, &backend, &backend, |_| {}).unwrap();
+
+        assert!(report.is_success());
+        assert!(destination_folder.join("first.mkv").is_file());
+        assert!(destination_folder.join("second.mp4").is_file());
+        assert!(!source_folder.exists());
+    }
+
+    #[test]
+    fn storage_path_parent_container_keeps_root_level_files_outside_cleanup() {
+        let root = StoragePath::Local(PathBuf::from("/media"));
+        let root_file = StoragePath::Local(PathBuf::from("/media/movie.mkv"));
+        let nested_file = StoragePath::S3("library/show/episode.mkv".to_owned());
+
+        assert_eq!(root_file.parent_container(), Some(root));
+        assert_eq!(
+            nested_file.parent_container(),
+            Some(StoragePath::S3("library/show".to_owned()))
+        );
+    }
+
+    fn test_movie_item() -> TmdbItem {
+        TmdbItem {
+            id: TmdbId::new(550).unwrap(),
+            media_type: MediaType::Movie,
+            title: "Fight Club".to_owned(),
+            original_title: None,
+            year: None,
+        }
     }
 }

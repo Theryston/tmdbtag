@@ -58,6 +58,7 @@ tmdbtag
   ├─ Choose the source and destination bucket independently when needed
   ├─ Choose an optional source or destination prefix for this run
   ├─ Choose Copy or Move
+  ├─ For Move, optionally delete each video's source folder after its last selected file succeeds
   ├─ Choose the destination folder or object prefix
   ├─ Select videos from the recursive file explorer
   ├─ Reuse and verify existing filename tags when possible
@@ -137,17 +138,23 @@ The guided session looks like this:
 6. If the source is S3, it asks for an optional source prefix. The empty value
    means the selected bucket root.
 7. It asks whether the operation should be `Copy` or `Move`.
-8. It asks for a local destination folder or an optional S3 destination prefix.
+8. For `Move`, it asks `Delete folders after action?`. If enabled, the
+   containing folder of each selected video is deleted recursively only after
+   that folder's last selected video or selected descendant completes successfully. The source root
+   is never treated as a cleanup folder. `Copy` never offers this option because
+   copies preserve the source tree.
+9. It asks for a local destination folder or an optional S3 destination prefix.
    The empty value means the destination bucket root.
-9. It scans the selected source recursively and opens one unified video
+10. It scans the selected source recursively and opens one unified video
    explorer.
-10. You expand folders, select individual videos, and confirm the selected array.
-11. For each selected file, you search TMDB live or enter a TMDB ID manually.
-12. For series, you enter a season and episode, which are validated against
-    TMDB.
-13. It builds and displays the complete plan, including every destination name.
-14. A final confirmation starts the operation. The default is always negative,
-    and the progress bar shows the current transfer speed while bytes move.
+11. You expand folders, select individual videos, and confirm the selected array.
+12. For each selected file, you search TMDB live or enter a TMDB ID manually.
+13. For series, you enter a season and episode, which are validated against
+   TMDB.
+14. It builds and displays the complete plan, including every destination name
+    and a cleanup warning when recursive folder deletion is enabled.
+15. A final confirmation starts the operation. The default is always negative,
+   and the progress bar shows the current transfer speed while bytes move.
 
 When local storage is selected, the directory where you launch the command is
 the source root; the executable's location is not used as the source root. When
@@ -366,6 +373,22 @@ Both modes use the same plan, naming rules, collision checks, confirmation
 screen, and progress reporting. The choice is visible in the preview, so there
 is no ambiguity about whether originals will remain.
 
+For `Move`, the optional `Delete folders after action?` choice extends the
+approved operation. When enabled, `tmdbtag` finds the immediate folder that
+contains each selected video and deletes that folder recursively after the
+last selected video in that folder has completed successfully. This can remove
+unselected files and subfolders inside that folder, so the final preview calls
+it out explicitly. If an operation in a folder fails, that folder is not
+cleaned up. A still-pending selected video anywhere below that folder also
+postpones cleanup because the removal is recursive. A video directly in the
+local source directory or directly under
+the selected S3 prefix has no nested source folder to delete. The local source
+root and the selected S3 bucket/prefix root are always protected.
+
+The cleanup applies to S3 as well: because S3 folders are virtual, the
+corresponding direct object-key prefix and everything below it are deleted.
+`Copy` never deletes source folders or source files.
+
 ## Naming that is human-friendly and machine-recoverable
 
 Generated filenames use the reserved field delimiter `__S__`:
@@ -443,7 +466,7 @@ The title is a display hint. The TMDB ID is the durable lookup key.
 `tmdbtag` treats local and S3 operations as a two-phase process:
 
 ```text
-Configure → Select storages → Discover → Identify → Build plan → Validate everything → Preview → Confirm → Execute → Report
+Configure → Select storages → Discover → Identify → Build plan → Validate everything → Preview → Confirm → Execute file actions and optional cleanup → Report
 ```
 
 No file is copied, moved, renamed, or deleted while the user is still
@@ -470,6 +493,14 @@ default and the final report separates:
 - the failed operation and its safe error category;
 - pending operations that were intentionally not attempted.
 
+When recursive source-folder cleanup is enabled, the cleanup target is also
+validated as a real nested local directory or a nested S3 prefix. It is
+attempted only after the selected file's destination has been published and
+the file's source has been removed. The cleanup happens once, at the last
+selected file for that immediate source folder, and is skipped for root-level
+files. A cleanup failure is reported as a failed operation; later operations
+are not started.
+
 ### Copy safety
 
 Copies stream bytes to a destination-side temporary file. The temporary file is
@@ -492,6 +523,13 @@ service-side equivalent of a rename — conditional `CopyObject` followed by a
 conditional delete — only when both the bucket and endpoint match; it never
 downloads and re-uploads the object through the CLI. Different S3 endpoints
 continue to use the private temporary bridge.
+
+If `Delete folders after action?` was answered `yes`, the executor then removes
+the immediate source folder (or its S3 prefix) only when the current operation
+is the last selected video inside that container or any of its descendants. The
+removal is recursive and can include unselected content. It never targets the
+source root, bucket root, or prefix root. A failed file action prevents cleanup
+for that file's container.
 
 ### Real byte-based progress
 

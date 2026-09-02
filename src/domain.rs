@@ -347,6 +347,7 @@ pub struct FilesystemSelection {
     destination: DestinationSelection,
     operation: FileOperation,
     sources: Vec<SelectedSource>,
+    delete_source_folders: bool,
 }
 
 impl FilesystemSelection {
@@ -362,7 +363,17 @@ impl FilesystemSelection {
             destination,
             operation,
             sources,
+            delete_source_folders: false,
         }
+    }
+
+    /// Enables or disables recursive cleanup of selected files' containing folders after moves.
+    ///
+    /// The executor applies this only to move plans. Keeping the choice on the selection makes it
+    /// available to the immutable plan without coupling the domain to the terminal prompt.
+    pub fn with_delete_source_folders(mut self, delete_source_folders: bool) -> Self {
+        self.delete_source_folders = delete_source_folders;
+        self
     }
 
     /// Returns the source root used for discovery.
@@ -383,6 +394,11 @@ impl FilesystemSelection {
     /// Returns the selected source groups in deterministic order.
     pub fn sources(&self) -> &[SelectedSource] {
         &self.sources
+    }
+
+    /// Returns whether containing source folders should be deleted after successful moves.
+    pub const fn delete_source_folders(&self) -> bool {
+        self.delete_source_folders
     }
 }
 
@@ -503,6 +519,7 @@ pub struct OperationPlan {
     destination: DestinationSelection,
     operation: FileOperation,
     operations: Vec<PlannedOperation>,
+    delete_source_folders: bool,
 }
 
 impl OperationPlan {
@@ -518,7 +535,14 @@ impl OperationPlan {
             destination,
             operation,
             operations,
+            delete_source_folders: false,
         }
+    }
+
+    /// Associates the confirmed folder-cleanup choice with this immutable plan.
+    pub fn with_delete_source_folders(mut self, delete_source_folders: bool) -> Self {
+        self.delete_source_folders = delete_source_folders;
+        self
     }
 
     /// Returns the source root used for relative display paths.
@@ -551,6 +575,12 @@ impl OperationPlan {
         self.operations.iter().fold(0, |total, operation| {
             total.saturating_add(operation.source_snapshot().size_bytes())
         })
+    }
+
+    /// Returns whether successful moves should recursively delete selected files' containing
+    /// folders after the last selected file or selected descendant in each folder completes.
+    pub const fn delete_source_folders(&self) -> bool {
+        self.delete_source_folders
     }
 }
 

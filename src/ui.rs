@@ -168,7 +168,14 @@ pub trait InteractiveUi {
                 plan.source_description(),
                 plan.destination_description()
             ),
-        )
+        )?;
+        if plan.delete_source_folders() {
+            self.show_message(
+                MessageLevel::Warning,
+                "Source folders will be deleted recursively after the last selected file in or below each folder succeeds.",
+            )?;
+        }
+        Ok(())
     }
 
     /// Displays one final result for every cross-storage operation.
@@ -259,7 +266,14 @@ pub trait InteractiveUi {
                 "Prepared an operation plan for {} file(s).",
                 plan.operation_count()
             ),
-        )
+        )?;
+        if plan.delete_source_folders() {
+            self.show_message(
+                MessageLevel::Warning,
+                "Source folders will be deleted recursively after the last selected file in or below each folder succeeds.",
+            )?;
+        }
+        Ok(())
     }
 
     /// Displays one final result for every operation after execution.

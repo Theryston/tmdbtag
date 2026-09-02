@@ -567,6 +567,17 @@ pub enum FilesystemError {
         #[source]
         cause: io::Error,
     },
+    /// A selected file completed, but its containing source folder could not be removed.
+    #[error(
+        "The file action completed, but the source folder could not be deleted at {path}: {cause}"
+    )]
+    SourceFolderRemoval {
+        /// The source folder that could not be removed.
+        path: PathBuf,
+        /// The operating-system error.
+        #[source]
+        cause: io::Error,
+    },
     /// A temporary artifact could not be removed after a failed operation.
     #[error("A temporary file could not be cleaned up at {path}: {cause}")]
     TemporaryCleanup {
@@ -620,6 +631,7 @@ impl FilesystemError {
             | Self::CopyVerification { .. }
             | Self::DestinationPublication { .. }
             | Self::SourceRemoval { .. }
+            | Self::SourceFolderRemoval { .. }
             | Self::TemporaryCleanup { .. } => 1,
         }
     }
@@ -737,6 +749,16 @@ pub enum StorageError {
         /// A sanitized operating-system explanation.
         message: String,
     },
+    /// A selected file completed, but its containing S3 prefix or local folder could not be removed.
+    #[error(
+        "The file action completed, but the source folder could not be deleted at {path} ({message})"
+    )]
+    SourceFolderRemoval {
+        /// A display-safe source folder or S3 prefix.
+        path: String,
+        /// A safe cleanup explanation.
+        message: String,
+    },
     /// A temporary local artifact could not be removed after an unsuccessful transfer.
     #[error("A temporary transfer artifact could not be cleaned up: {path} ({message})")]
     TemporaryCleanup {
@@ -766,6 +788,7 @@ impl StorageError {
             | Self::DestinationCreation { .. }
             | Self::DestinationPublication { .. }
             | Self::SourceRemoval { .. }
+            | Self::SourceFolderRemoval { .. }
             | Self::TemporaryCleanup { .. }
             | Self::UnsupportedTransfer => 1,
         }

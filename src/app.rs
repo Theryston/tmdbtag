@@ -190,6 +190,10 @@ where
             ui.show_message(MessageLevel::Info, "Storage selection canceled.")?;
             return Ok(RunOutcome::Cancelled);
         };
+        let Some(delete_source_folders) = choose_source_folder_cleanup(ui, operation)? else {
+            ui.show_message(MessageLevel::Info, "Operation selection canceled.")?;
+            return Ok(RunOutcome::Cancelled);
+        };
 
         ui.show_step(5, 8, "Choose destination")?;
         let Some(selection) = collect_storage_selection(
@@ -197,6 +201,7 @@ where
             source_backend.as_ref(),
             destination_backend.as_ref(),
             operation,
+            delete_source_folders,
         )?
         else {
             ui.show_message(MessageLevel::Info, "Storage selection canceled.")?;
@@ -487,11 +492,23 @@ fn build_storage_backend(
     }
 }
 
+fn choose_source_folder_cleanup<U: InteractiveUi>(
+    ui: &mut U,
+    operation: FileOperation,
+) -> AppResult<Option<bool>> {
+    if operation.preserves_source() {
+        return Ok(Some(false));
+    }
+
+    Ok(ui.confirm("Delete folders after action?", false)?)
+}
+
 fn collect_storage_selection<U: InteractiveUi>(
     ui: &mut U,
     source_backend: &dyn StorageBackend,
     destination_backend: &dyn StorageBackend,
     operation: FileOperation,
+    delete_source_folders: bool,
 ) -> AppResult<Option<StorageSelection>> {
     let source_root = source_backend.source_root()?;
     let Some(destination_input) = ui.ask_storage_destination_path(destination_backend.kind())?
@@ -562,14 +579,17 @@ fn collect_storage_selection<U: InteractiveUi>(
         destination.path().display_relative_to(&destination_root)
     );
 
-    Ok(Some(StorageSelection::new(
-        source_root,
-        destination,
-        operation,
-        files,
-        source_description,
-        destination_description,
-    )))
+    Ok(Some(
+        StorageSelection::new(
+            source_root,
+            destination,
+            operation,
+            files,
+            source_description,
+            destination_description,
+        )
+        .with_delete_source_folders(delete_source_folders),
+    ))
 }
 
 fn organize_storage_selection<U, C>(
@@ -597,10 +617,10 @@ where
     ui.show_storage_plan_preview(&plan)?;
 
     let Some(confirmed) = ui.confirm(
-        &format!(
-            "{} and rename {} files?",
-            plan.operation().label(),
-            plan.operation_count()
+        &operation_confirmation_prompt(
+            plan.operation(),
+            plan.operation_count(),
+            plan.delete_source_folders(),
         ),
         false,
     )?
@@ -950,6 +970,10 @@ fn collect_filesystem_selection_from_root<U: InteractiveUi>(
             }
         ),
     )?;
+    let Some(delete_source_folders) = choose_source_folder_cleanup(ui, operation)? else {
+        ui.show_message(MessageLevel::Info, "Operation selection canceled.")?;
+        return Ok(None);
+    };
 
     'destination: loop {
         ui.show_step(2, 6, "Choose the destination folder")?;
@@ -1048,12 +1072,10 @@ fn collect_filesystem_selection_from_root<U: InteractiveUi>(
                 return Ok(None);
             }
 
-            return Ok(Some(FilesystemSelection::new(
-                source_root,
-                destination,
-                operation,
-                selected_sources,
-            )));
+            return Ok(Some(
+                FilesystemSelection::new(source_root, destination, operation, selected_sources)
+                    .with_delete_source_folders(delete_source_folders),
+            ));
         }
     }
 }
@@ -1150,10 +1172,10 @@ where
     ui.show_plan_preview(&plan)?;
 
     let Some(confirmed) = ui.confirm(
-        &format!(
-            "{} and rename {} files?",
-            plan.operation().label(),
-            plan.operation_count()
+        &operation_confirmation_prompt(
+            plan.operation(),
+            plan.operation_count(),
+            plan.delete_source_folders(),
         ),
         false,
     )?
@@ -1304,12 +1326,15 @@ where
         return Err(PlanningError::EmptyPlan.into());
     }
 
-    Ok(Some(OperationPlan::new(
-        selection.source_root().clone(),
-        selection.destination().clone(),
-        selection.operation(),
-        operations,
-    )))
+    Ok(Some(
+        OperationPlan::new(
+            selection.source_root().clone(),
+            selection.destination().clone(),
+            selection.operation(),
+            operations,
+        )
+        .with_delete_source_folders(selection.delete_source_folders()),
+    ))
 }
 
 fn build_selected_file_operation<U, C>(
@@ -1413,6 +1438,26 @@ fn is_recoverable_organization_error(error: &AppError) -> bool {
             | AppError::Naming(_)
             | AppError::Filesystem(_)
             | AppError::Storage(_)
+    )
+}
+
+fn operation_confirmation_prompt(
+    operation: FileOperation,
+    operation_count: usize,
+    delete_source_folders: bool,
+) -> String {
+    if delete_source_folders && operation == FileOperation::Move {
+        return format!(
+            "{} and rename {} files, then delete each source folder recursively?",
+            operation.label(),
+            operation_count
+        );
+    }
+
+    format!(
+        "{} and rename {} files?",
+        operation.label(),
+        operation_count
     )
 }
 
@@ -3011,6 +3056,38 @@ mod tests {
             !ui.events
                 .iter()
                 .any(|event| event.contains(&*absolute_root))
+        );
+    }
+
+    #[test]
+    fn move_selection_asks_for_recursive_source_folder_cleanup() {
+        let directory = tempdir().unwrap();
+        let source_folder = directory.path().join("movies");
+        let destination = directory.path().join("organized");
+        fs::create_dir(&source_folder).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(source_folder.join("movie.mkv"), "movie").unwrap();
+
+        let mut ui = RecordingUi {
+            destination_input: Some("organized".to_owned()),
+            file_operations: vec![Some(FileOperation::Move)],
+            select_many_responses: vec![Some(vec![0])],
+            confirm_responses: vec![Some(true)],
+            ..RecordingUi::default()
+        };
+
+        let selection = collect_filesystem_selection_from_root(
+            &mut ui,
+            SourceRoot::new(directory.path().to_path_buf()),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert!(selection.delete_source_folders());
+        assert!(
+            ui.events
+                .iter()
+                .any(|event| event == "confirm:Delete folders after action?")
         );
     }
 

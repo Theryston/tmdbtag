@@ -991,6 +991,13 @@ impl InteractiveUi for TerminalUi {
             "Total bytes: {}",
             crate::ui::format_file_size(plan.total_size_bytes())
         ))?;
+        if plan.delete_source_folders() {
+            self.write_line(&dialoguer::console::style(
+                "Warning: each source folder will be deleted recursively after its last selected file or descendant succeeds.",
+            )
+            .yellow()
+            .to_string())?;
+        }
         self.write_line("")?;
 
         for operation in plan.operations() {
@@ -1284,6 +1291,13 @@ impl InteractiveUi for TerminalUi {
             "Total bytes: {}",
             crate::ui::format_file_size(plan.total_size_bytes())
         ))?;
+        if plan.delete_source_folders() {
+            self.write_line(&dialoguer::console::style(
+                "Warning: each source folder will be deleted recursively after its last selected file or descendant succeeds.",
+            )
+            .yellow()
+            .to_string())?;
+        }
         self.write_line("")?;
 
         for operation in plan.operations() {
