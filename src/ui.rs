@@ -1,6 +1,7 @@
 use std::{
     fmt,
     path::{Component, Path, PathBuf},
+    time::Duration,
 };
 
 use crate::{
@@ -32,6 +33,8 @@ pub trait ProgressOutput: fmt::Debug {
     fn set_message(&self, message: &str);
     /// Updates the aggregate byte-based progress for the activity.
     fn set_progress(&self, completed_bytes: u64, total_bytes: u64);
+    /// Prints a completed-item log above the active progress indicator.
+    fn log(&self, message: &str);
     /// Finishes the activity with a success message.
     fn finish_success(&self, message: &str);
     /// Finishes the activity with an error message.
@@ -455,6 +458,39 @@ pub(crate) fn format_transfer_speed(bytes_per_second: f64) -> String {
     }
 }
 
+/// Formats one operation duration for a concise terminal log.
+pub(crate) fn format_elapsed_time(duration: Duration) -> String {
+    let total_milliseconds = duration.as_millis();
+    if total_milliseconds < 1_000 {
+        return format!("{total_milliseconds} ms");
+    }
+
+    let total_seconds = duration.as_secs();
+    if total_seconds < 60 {
+        return format!(
+            "{}.{:02} seconds",
+            total_seconds,
+            duration.subsec_millis() / 10
+        );
+    }
+
+    let seconds = total_seconds % 60;
+    let total_minutes = total_seconds / 60;
+    if total_minutes < 60 {
+        return format!("{total_minutes}m {seconds:02}s");
+    }
+
+    let minutes = total_minutes % 60;
+    let total_hours = total_minutes / 60;
+    if total_hours < 24 {
+        return format!("{total_hours}h {minutes:02}m {seconds:02}s");
+    }
+
+    let hours = total_hours % 24;
+    let days = total_hours / 24;
+    format!("{days}d {hours:02}h {minutes:02}m {seconds:02}s")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -490,5 +526,23 @@ mod tests {
         assert_eq!(format_transfer_speed(f64::NAN), "0 B/s");
         assert_eq!(format_transfer_speed(f64::INFINITY), "0 B/s");
         assert_eq!(format_transfer_speed(-1.0), "0 B/s");
+    }
+
+    #[test]
+    fn elapsed_time_uses_readable_units() {
+        assert_eq!(format_elapsed_time(Duration::from_millis(125)), "125 ms");
+        assert_eq!(
+            format_elapsed_time(Duration::from_millis(1_250)),
+            "1.25 seconds"
+        );
+        assert_eq!(format_elapsed_time(Duration::from_secs(125)), "2m 05s");
+        assert_eq!(
+            format_elapsed_time(Duration::from_secs(3_725)),
+            "1h 02m 05s"
+        );
+        assert_eq!(
+            format_elapsed_time(Duration::from_secs(90_125)),
+            "1d 01h 02m 05s"
+        );
     }
 }

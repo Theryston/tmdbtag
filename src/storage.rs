@@ -603,6 +603,7 @@ pub struct StorageTransferProgress {
     total_bytes: u64,
     current_file_bytes: u64,
     current_file_total: u64,
+    operation_completed: bool,
 }
 
 impl StorageTransferProgress {
@@ -613,6 +614,7 @@ impl StorageTransferProgress {
         total_bytes: u64,
         current_file_bytes: u64,
         current_file_total: u64,
+        operation_completed: bool,
     ) -> Self {
         Self {
             operation_index,
@@ -621,6 +623,7 @@ impl StorageTransferProgress {
             total_bytes,
             current_file_bytes,
             current_file_total,
+            operation_completed,
         }
     }
 
@@ -652,6 +655,11 @@ impl StorageTransferProgress {
     /// Returns planned bytes for the active file.
     pub const fn current_file_total(self) -> u64 {
         self.current_file_total
+    }
+
+    /// Returns whether this update marks successful completion of the current operation.
+    pub const fn operation_completed(self) -> bool {
+        self.operation_completed
     }
 }
 
@@ -1989,6 +1997,7 @@ where
             total_bytes,
             0,
             file_total,
+            false,
         ));
 
         let mut report_progress = |current_file_bytes: u64| {
@@ -2003,6 +2012,7 @@ where
                 total_bytes,
                 current_file_bytes,
                 file_total,
+                false,
             ));
         };
 
@@ -2022,6 +2032,7 @@ where
                     total_bytes,
                     file_total,
                     file_total,
+                    true,
                 ));
                 results.push(StorageOperationResult::new(
                     operation.source_display.clone(),

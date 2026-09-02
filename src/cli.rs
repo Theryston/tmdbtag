@@ -1469,6 +1469,10 @@ impl ProgressOutput for IndicatifProgress {
         ));
     }
 
+    fn log(&self, message: &str) {
+        self.progress.println(format!("✔ {message}"));
+    }
+
     fn finish_success(&self, message: &str) {
         self.progress.finish_with_message(format!("✔ {message}"));
     }

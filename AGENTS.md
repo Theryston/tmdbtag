@@ -257,7 +257,15 @@ unit. The explorer's folder hierarchy is display context, while the application
 retains an internal source-container association for safe plan validation; it
 does not determine the metadata for every file inside it.
 
-- Run the complete identification loop for every selected video file.
+- Process every selected video file independently through either tag recovery
+  or the complete interactive identification loop.
+- Before opening that loop, inspect each selected filename with the canonical
+  parser. A valid movie tag must be verified through TMDB using its embedded ID
+  and media type; a valid series tag must additionally be verified using its
+  embedded season and episode. A fully verified tag skips only the
+  identification prompts; the selected copy-or-move operation still applies.
+- If a filename is malformed or its embedded metadata cannot be verified, use
+  the normal interactive identification flow so the user can repair it.
 - A movie file creates one operation without an episode reference.
 - A series file creates one operation after its season and episode are validated
   through TMDB.
@@ -272,6 +280,9 @@ does not determine the metadata for every file inside it.
 - Search results must distinguish movies from TV series.
 - Search must never silently accept the first result.
 - A manually entered numeric ID must be paired with a media type.
+- A canonical existing filename may provide a candidate ID, media type, and
+  series episode, but those values must be independently verified through TMDB
+  before the identification prompts are skipped.
 - The selected item must be resolved and confirmed through TMDB before a copy or
   move plan is created.
 - A series episode must be validated against TMDB before the final preview.
@@ -725,12 +736,13 @@ It should coordinate:
 8. backend-specific destination selection;
 9. one recursive video discovery with destination-prefix exclusion;
 10. one unified expandable video-file selection;
-11. TMDB identification;
-12. series episode input;
-13. plan construction;
-14. full validation;
-15. preview and confirmation;
-16. local, S3, or cross-storage copy/move execution and final reporting.
+11. canonical filename recovery and TMDB verification for already tagged files;
+12. interactive TMDB identification for files that still need metadata;
+13. series episode input for non-recovered series files;
+14. plan construction;
+15. full validation;
+16. preview and confirmation;
+17. local, S3, or cross-storage copy/move execution and final reporting.
 
 It should depend on abstractions or focused modules, not on terminal-specific
 implementation details.
@@ -1739,6 +1751,14 @@ no-replace publication succeeds because no byte stream is copied. Clamp values
 to the plan total and treat a successfully published zero-byte file as complete.
 The callback must not authorize, reorder, retry, or mutate an operation.
 
+Each successful operation must produce one completion event after publication.
+The terminal progress adapter should use that event to print a concise log line
+above the active progress indicator, including the source, destination, selected
+copy-or-move action, and elapsed time for that individual operation. Use the
+renderer-safe logging primitive so the line does not corrupt or replace the
+determinate bar. Failed and pending operations must not be reported as
+successful completions.
+
 The terminal renderer should derive its transfer-rate display from these actual
 progress updates. Use decimal units with the labels `B/s`, `KB/s`, `MB/s`,
 `GB/s`, and `TB/s`; do not estimate speed from file counts or an arbitrary
@@ -2030,6 +2050,9 @@ Cover at least:
 - root-level and nested videos selected from one explorer;
 - cancellation at each pre-commit stage;
 - multiple selected files each receive an independent identification loop;
+- an already tagged movie is verified and skips identification prompts;
+- an already tagged series episode is verified and skips identification prompts;
+- an unverified or stale tag falls back to interactive identification;
 - invalid episode corrected;
 - duplicate episode rejected;
 - search result explicitly selected;

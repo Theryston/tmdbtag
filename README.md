@@ -60,6 +60,7 @@ tmdbtag
   ├─ Choose Copy or Move
   ├─ Choose the destination folder or object prefix
   ├─ Select videos from the recursive file explorer
+  ├─ Reuse and verify existing filename tags when possible
   ├─ Identify each file with live TMDB search or a direct ID
   ├─ Enter and validate episode data for series
   ├─ Review the complete plan
@@ -334,6 +335,24 @@ For a series, the CLI asks for the season and episode for that specific file. It
 validates the episode through TMDB before showing the final plan. No episode or
 title is inferred from a vague original filename in the MVP.
 
+### Automatic recovery for already tagged files
+
+Before opening the identification prompts for a selected video, `tmdbtag`
+checks whether its filename follows the canonical format described below. A
+canonical movie filename is verified by fetching its embedded TMDB ID and
+confirming the movie namespace. A canonical series filename is verified by
+fetching its embedded series ID and checking the combined `S<season>E<episode>`
+field against TMDB.
+
+When all of those checks succeed, the CLI shows an explicit success message and
+skips the search, ID, and episode prompts for that file. The selected Copy or
+Move operation still applies normally, so an already tagged file can be
+processed together with files that still need identification. If the filename
+is malformed, the ID cannot be verified, or a series episode does not exist,
+the file returns to the normal identification flow so the user can correct its
+metadata. The title segment is checked as canonical filename data, but the
+verified TMDB ID remains the authoritative lookup key.
+
 ## Copy or move, by choice
 
 The operation mode is selected near the beginning of the workflow:
@@ -494,6 +513,20 @@ reported byte movement. It uses decimal units and displays values such as
 that complete through logical publication without a client-side byte stream,
 such as a same-volume move or a server-side S3 copy, may show `0 B/s` because
 there were no transfer bytes to measure.
+
+When each file finishes successfully, `tmdbtag` prints a compact completion log
+above the still-running progress indicator. The log identifies the source and
+destination and reports the elapsed time for that individual operation, for
+example:
+
+```text
+✔ Copied movies/input.mkv to 550__S__MOVIE__S__Fight Club.mkv in 1.25 seconds.
+```
+
+The time uses readable units: milliseconds for sub-second operations, seconds
+for short transfers, and forms such as `2m 05s`, `1h 02m 05s`, or
+`1d 01h 02m 05s` for longer ones.
+Failed or pending files do not receive a successful-completion log.
 
 ## Supported video files
 

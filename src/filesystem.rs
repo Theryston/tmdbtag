@@ -73,6 +73,7 @@ pub struct TransferProgress {
     total_bytes: u64,
     current_file_bytes: u64,
     current_file_total: u64,
+    operation_completed: bool,
 }
 
 impl TransferProgress {
@@ -83,6 +84,7 @@ impl TransferProgress {
         total_bytes: u64,
         current_file_bytes: u64,
         current_file_total: u64,
+        operation_completed: bool,
     ) -> Self {
         Self {
             operation_index,
@@ -91,6 +93,7 @@ impl TransferProgress {
             total_bytes,
             current_file_bytes,
             current_file_total,
+            operation_completed,
         }
     }
 
@@ -122,6 +125,11 @@ impl TransferProgress {
     /// Returns the planned size of the current file.
     pub const fn current_file_total(self) -> u64 {
         self.current_file_total
+    }
+
+    /// Returns whether this update marks successful completion of the current file.
+    pub const fn operation_completed(self) -> bool {
+        self.operation_completed
     }
 }
 
@@ -803,6 +811,7 @@ where
             total_bytes,
             0,
             current_file_total,
+            false,
         ));
 
         if let Err(error) = validate_operation_at_commit(plan, operation) {
@@ -833,6 +842,7 @@ where
                     total_bytes,
                     current_file_total,
                     current_file_total,
+                    true,
                 ));
                 statuses[index] = OperationStatus::Completed;
             }
@@ -969,6 +979,7 @@ impl<'a> TransferContext<'a> {
             self.total_bytes,
             current_file_bytes,
             current_file_total,
+            false,
         ));
     }
 }
